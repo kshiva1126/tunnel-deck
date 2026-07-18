@@ -1,112 +1,355 @@
 # Implementation plan
 
-## Decisions to confirm first
+This document turns the product specification and architecture into an
+implementation sequence. It defines the initial compatibility contracts before
+code is written and keeps each milestone small enough to verify independently.
 
-The next implementation agent should confirm these with the user if they would
-materially change the initial code structure:
+## Decisions for the initial implementation
 
-1. **OpenSSH process supervision or native SSH?** The current recommendation is
-   OpenSSH for the MVP because compatibility is more important than a
-   pure-Rust transport stack.
-2. **Daemon startup model.** Start on demand from `tdeck`, with optional user
-   systemd integration later, or install a systemd user unit immediately? The
-   current recommendation is on-demand first.
-3. **Interactive authentication.** Agent/key-based authentication is simplest
-   for a background daemon. Password and passphrase prompting requires a secure
-   request/response flow and should not be improvised.
-4. **Configuration compatibility.** No compatibility with another application's
-   data format is required unless the user explicitly requests an importer.
+Use the following defaults unless the repository owner explicitly changes
+them before the affected milestone starts:
 
-## Milestone 0 — scaffold and contracts
+1. **Supervise the system OpenSSH client.** OpenSSH compatibility is more
+   important to the MVP than an in-process Rust SSH transport.
+2. **Start the daemon on demand.** A CLI or TUI client starts the per-user
+   daemon when its socket is absent. A systemd user unit remains an optional
+   distribution feature.
+3. **Support non-interactive authentication only.** The MVP supports ssh-agent
+   and key-based authentication that does not require a terminal prompt. It
+   does not store, request, or forward passwords and key passphrases.
+4. **Do not import another application's configuration.** Add importers later
+   as explicit, separately tested migrations if users need them.
+5. **Use UUIDs as stable rule identities.** Human-readable names remain unique
+   and editable, but persisted references and IPC operations use rule IDs.
+6. **Make the daemon the only configuration writer.** CLI and TUI clients
+   perform mutations through IPC so concurrent writes cannot diverge.
 
-- Initialize a Rust binary package named `tunnel-deck`.
-- Configure the executable name as `tdeck`.
-- Add formatting, Clippy, tests, and a minimal Linux CI workflow.
-- Establish module boundaries and typed error handling.
-- Write protocol and persisted-config schemas before implementing the daemon.
-- Add license and contribution policy chosen by the repository owner.
+The repository owner must choose the project license before Milestone 0 is
+complete. Do not copy third-party code or assets until their licenses have been
+verified and all required notices can be preserved.
+
+## Version 1 compatibility contracts
+
+These contracts should be documented in code and covered by fixtures before
+the daemon or TUI depends on them.
+
+### Persisted configuration
+
+Store desired configuration as versioned TOML. Use an internally tagged enum
+for forwarding-specific fields so fields that do not apply are omitted rather
+than filled with placeholder values. A representative Local rule is:
+
+```toml
+schema_version = 1
+
+[[rules]]
+id = "018f6ba0-3be8-7c42-9f1f-61b99fc2e076"
+name = "database"
+ssh_host_alias = "production"
+kind = "local"
+bind_address = "127.0.0.1"
+bind_port = 5433
+destination_host = "127.0.0.1"
+destination_port = 5432
+auto_start = false
+reconnect = true
+```
+
+The forwarding variants are:
+
+- Local: bind address and port plus destination host and port.
+- Remote: remote bind address and port plus destination host and port.
+- Dynamic: bind address and port only.
+
+Configuration writes must use a temporary file in the same directory, flush
+the file, atomically rename it, and flush the parent directory where supported.
+Before a migration, retain a recoverable copy of the previous configuration.
+Tests must inject XDG paths and never read or write the developer's real home
+directory.
+
+Do not persist a PID and assume it still identifies a managed SSH process.
+Runtime status belongs in daemon memory. If `state.json` becomes necessary for
+recovery metadata, give it an independent schema version and never use it as
+proof that a process is alive.
+
+### IPC protocol
+
+Use newline-delimited JSON over a per-user Unix socket for version 1. Every
+request contains a protocol version, UUID request ID, operation, and payload.
+Every response echoes the request ID and contains either a result or a
+structured error. Event subscriptions use separate messages with a monotonically
+increasing sequence number.
+
+Protocol requirements:
+
+- Maximum encoded message size: 1 MiB.
+- Reject malformed, oversized, and unsupported-version messages before
+  dispatch.
+- Escape embedded newlines through normal JSON encoding; a literal newline is
+  the frame delimiter.
+- Use stable machine-readable error codes and human-readable diagnostics.
+- Apply timeouts to client connections and request/response operations.
+- Make start and stop operations idempotent.
+- Close subscriptions cleanly when clients disconnect or lag beyond a bounded
+  event buffer.
+- Create the runtime directory with mode `0700` and the socket with mode
+  `0600`; verify that an existing socket is owned by the current user.
+
+The first request must negotiate or declare the protocol version. A mismatched
+client and daemon must fail with a clear upgrade/restart diagnostic instead of
+attempting partial compatibility.
+
+### CLI surface
+
+Validate this command tree during Milestone 0 and then treat it as a public
+interface:
+
+```text
+tdeck                              Open the TUI
+tdeck host list                    List discovered SSH hosts
+tdeck host show <alias>            Show effective host settings
+tdeck host test <alias>            Test non-interactive connectivity
+tdeck forward list                 List forwarding rules
+tdeck forward add                  Add a rule non-interactively
+tdeck forward remove <rule>        Remove a stopped rule
+tdeck forward start <rule>         Start a rule
+tdeck forward stop <rule>          Stop a rule
+tdeck status                       Show daemon and tunnel status
+tdeck daemon run                   Run the internal daemon entry point
+```
+
+Commands intended for automation should support a stable JSON output mode.
+Rule arguments may accept an exact unique name for convenience, but responses
+and persisted references should always include the UUID.
+
+### OpenSSH command construction
+
+Spawn OpenSSH directly with an argument vector and never through a shell. The
+managed invocation should explicitly prevent OpenSSH configuration from
+forking or reusing an unobservable master process. A typical Local invocation
+is conceptually:
+
+```text
+ssh -N -T
+    -o ExitOnForwardFailure=yes
+    -o BatchMode=yes
+    -o ClearAllForwardings=yes
+    -o ControlMaster=no
+    -o ForkAfterAuthentication=no
+    -L <forward-spec>
+    <host-alias>
+```
+
+Do not add options that weaken host-key verification. Preserve the configured
+host alias so OpenSSH continues to apply the user's `Host`, `Include`,
+`ProxyJump`, identity, agent, and known-hosts behavior. Treat the SSH
+configuration as user-controlled input and ensure logs do not expose sensitive
+arguments or environment values.
+
+Place each child in a process group that TunnelDeck can terminate as one unit.
+Attempt graceful termination first, wait for a bounded period, and force
+termination only as a fallback. Design daemon-crash behavior so an unmanaged
+tunnel is not silently left behind, and do not signal a process based only on
+a stale numeric PID.
+
+### Host discovery
+
+Enumerate concrete aliases from the user's OpenSSH configuration, following
+`Include` files with cycle protection and bounded traversal. Do not attempt to
+turn wildcard-only `Host` patterns into concrete hosts. Resolve displayed
+effective settings with `ssh -G <alias>` so TunnelDeck does not reimplement
+OpenSSH precedence rules. Refreshing the host list must not require restarting
+the daemon or TUI.
+
+## Module boundaries
+
+Begin with one Rust package and one `tdeck` binary:
+
+```text
+src/
+├── main.rs
+├── cli/
+├── tui/
+├── application/
+├── domain/
+│   ├── host.rs
+│   ├── rule.rs
+│   ├── status.rs
+│   └── validation.rs
+├── daemon/
+│   ├── lifecycle.rs
+│   ├── manager.rs
+│   ├── reconnect.rs
+│   └── process.rs
+├── ipc/
+├── config/
+└── logging/
+```
+
+Keep domain types independent of Ratatui, Clap, Tokio process APIs, and wire
+serialization where practical. UI code must call application operations
+through the same IPC service as the CLI and must never own SSH children.
+
+## Milestone 0 — scaffold and freeze contracts
+
+Tasks:
+
+- Initialize a Rust binary package named `tunnel-deck` with binary name
+  `tdeck`, and commit `Cargo.lock`.
+- Add the module skeleton, typed top-level errors, and explicit process exit
+  codes.
+- Implement the Clap command definitions without claiming unfinished tunnel
+  behavior.
+- Add serde types and fixtures for configuration and IPC version 1.
+- Select and add the project license and contribution policy.
+- Add a minimal Linux CI workflow that runs formatting, Clippy, and tests.
 
 Exit criteria:
 
 - `tdeck --help` and `tdeck --version` work.
+- Configuration and IPC fixtures serialize to the documented version 1 shape.
 - Checks pass in a clean checkout.
-- No tunnel behavior is falsely advertised yet.
+- Help output clearly marks or omits behavior that is not implemented.
 
-## Milestone 1 — testable domain and configuration
+## Milestone 1 — domain, configuration, and host discovery
 
-- Define forwarding rule types with per-type fields.
-- Implement validation and name/ID rules.
-- Implement XDG path resolution.
-- Load and atomically save versioned TOML configuration.
-- Add migration infrastructure even if only schema version 1 exists.
+Tasks:
 
-Exit criteria:
-
-- Invalid and conflicting rules have structured errors.
-- Configuration round trips without losing data.
-- Tests do not touch real user directories.
-
-## Milestone 2 — daemon and local forwarding
-
-- Implement per-user daemon lifecycle and Unix-socket IPC.
-- Supervise OpenSSH without a shell.
-- Implement Local forwarding and `ExitOnForwardFailure` handling.
-- Publish state changes and bounded stderr diagnostics.
-- Implement graceful and forced shutdown behavior.
+- Implement Local, Remote, and Dynamic rule types with stable IDs.
+- Validate names, addresses, port ranges, required fields, and duplicate local
+  listeners with structured errors.
+- Implement the named runtime-state transitions independently of processes.
+- Resolve XDG paths with documented fallbacks and restrictive permissions.
+- Load and atomically save versioned TOML with migration infrastructure.
+- Discover explicit SSH host aliases and resolve their effective settings via
+  `ssh -G`.
 
 Exit criteria:
 
-- CLI can start, inspect, and stop a Local rule.
-- Tunnels remain active after the CLI process exits.
-- Tests use a fake SSH executable; optional real-SSH tests are isolated.
+- Invalid and conflicting rules fail before process construction.
+- All rule variants round-trip without adding irrelevant fields.
+- Configuration tests use temporary directories only.
+- Included SSH configurations, cycles, missing files, and wildcard patterns
+  have deterministic tests.
+
+## Milestone 2 — daemon and Local forwarding vertical slice
+
+Tasks:
+
+- Implement the Unix-socket server, client, framing limits, request dispatch,
+  and event subscriptions.
+- Add race-safe on-demand daemon startup and enforce one daemon per user.
+- Locate and validate the OpenSSH executable.
+- Build Local forwarding arguments without a shell.
+- Supervise the SSH process group, detect early listener failure, retain a
+  bounded stderr diagnostic, and implement graceful/forced shutdown.
+- Expose create, list, start, stop, status, and delete through the CLI.
+
+Exit criteria:
+
+- The CLI can persist, start, inspect, stop, and remove a Local rule.
+- A tunnel remains active after the invoking CLI process and TUI client exit.
+- Repeated start and stop requests are safe and deterministic.
+- A fake SSH executable covers success, nonzero exit, delayed exit, large
+  stderr, signal handling, and forced termination.
+- IPC tests cover malformed frames, limits, timeouts, disconnects, permissions,
+  and version mismatch.
 
 ## Milestone 3 — usable TUI
 
-- Add terminal lifecycle and panic/error restoration.
-- Implement dashboard, host browser, rule form, confirmation dialog, logs, and
-  contextual help.
-- Subscribe to daemon events rather than polling every frame.
-- Support small-terminal fallback behavior.
+Tasks:
+
+- Add terminal setup and restoration on normal exit, error, panic, and signal.
+- Implement the dashboard, host browser, type-aware rule form, confirmation
+  dialog, diagnostics view, settings, and contextual help.
+- Subscribe to daemon events rather than polling on every rendered frame.
+- Preserve selection across updates and provide a useful small-terminal
+  fallback.
+- Ensure destructive operations require confirmation.
 
 Exit criteria:
 
-- A user can create and run a Local rule without editing files.
-- Keyboard operations are discoverable.
-- Rendering and form behavior have automated tests.
+- A user can discover a host, create a Local rule, and run it without editing
+  files.
+- Keyboard operations are discoverable and terminal state is always restored.
+- Rendering and form tests cover normal, narrow, short, and empty states.
+- Closing the TUI does not stop daemon-managed tunnels.
 
 ## Milestone 4 — forwarding parity and recovery
 
-- Add Remote and Dynamic forwarding.
-- Add capped exponential reconnect with jitter.
-- Add auto-start and daemon-restart reconciliation.
-- Add port-conflict detection and clearer SSH diagnostics.
+Tasks:
+
+- Add Remote and Dynamic OpenSSH argument construction and controls.
+- Add capped exponential reconnect with jitter and cancellation.
+- Start configured `auto_start` rules when the daemon becomes ready.
+- Reconcile daemon restarts without adopting or duplicating unmanaged
+  processes.
+- Add local port-availability warnings and classify common OpenSSH failures
+  without relying on a single locale-specific stderr string.
 
 Exit criteria:
 
-- All three forwarding types pass isolated end-to-end tests.
-- Recovery never launches duplicate unmanaged processes.
+- Local, Remote, and Dynamic rules pass isolated end-to-end tests.
+- Recovery cannot launch duplicate children for one rule.
+- Manual stop cancels pending reconnect immediately.
+- Authentication, host-key, listener, remote rejection, and network failures
+  remain distinguishable without leaking credentials.
 
 ## Milestone 5 — distribution and hardening
 
-- Produce Linux `x86_64` and `aarch64` artifacts and checksums.
-- Decide whether binaries dynamically or statically link platform libraries.
-- Add shell completions and man pages.
-- Optionally add a systemd user service and packaging.
-- Conduct security review of IPC permissions, command construction, logs, and
-  process signaling.
+Tasks:
+
+- Produce reproducible Linux `x86_64` and `aarch64` artifacts and checksums.
+- Define the minimum supported Linux environment and linkage strategy.
+- Add shell completions, man pages, and upgrade documentation.
+- Optionally add a systemd user unit without making it mandatory.
+- Audit dependency licenses and preserve required third-party notices.
+- Review IPC permissions, atomic writes, command construction, logging,
+  process signaling, and denial-of-service bounds.
 
 Exit criteria:
 
+- A fresh user can install one binary and complete every MVP acceptance
+  criterion from the product specification.
 - Installation and upgrade are documented and reproducible.
-- A release artifact works on the documented minimum Linux environment.
+- Release artifacts pass smoke tests on both supported architectures.
 
-## First-session checklist for the next Codex run
+## Test matrix and completion checks
 
-1. Read all repository documentation.
-2. Inspect the local Rust toolchain and Git status.
-3. Ask only about unresolved decisions that block the selected milestone.
-4. Create a small plan and implement Milestone 0 without adding speculative
-   SSH behavior.
-5. Run format, Clippy, and tests.
-6. Summarize files changed, verification results, and remaining decisions in
-   Japanese.
+Use deterministic unit and integration tests by default:
+
+- Domain: validation, conflicts, and every permitted or rejected state
+  transition.
+- Configuration: round-trip, unknown version, migration, interrupted write,
+  permissions, and XDG fallback behavior.
+- Protocol: framing, malformed JSON, size limit, request correlation, event
+  ordering, lagging subscribers, and version mismatch.
+- Process: fake `ssh` behavior, exact argument construction, bounded output,
+  early failure, unexpected exit, and signal escalation.
+- TUI: buffer or snapshot tests at several terminal sizes and input-driven form
+  tests.
+- Integration: daemon and clients in an isolated temporary runtime directory.
+- Optional end-to-end: a containerized SSH server for all forwarding types,
+  independent of the developer's personal SSH configuration.
+
+Before reporting any implementation milestone complete, run:
+
+```text
+cargo fmt --check
+cargo clippy --all-targets --all-features
+cargo test
+```
+
+Document any additional platform-dependent end-to-end checks separately; they
+must not make the default test suite depend on network access or a real SSH
+account.
+
+## First implementation session
+
+1. Confirm the project license.
+2. Implement only Milestone 0.
+3. Review the committed configuration and IPC fixtures before building the
+   daemon against them.
+4. Run all completion checks.
+5. Report files changed, verification results, and remaining decisions without
+   advertising unimplemented SSH behavior.
