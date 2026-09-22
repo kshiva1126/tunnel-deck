@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -77,7 +78,11 @@ class ValidationTests(unittest.TestCase):
 
     def test_push_uses_trusted_noninteractive_askpass(self):
         def completed(command, **_kwargs):
-            output = "b" * 40 + "\n" if command[-2:] == ["rev-parse", "FETCH_HEAD"] else ""
+            output = ""
+            if command[-2:] in (["rev-parse", "HEAD"], ["rev-parse", "FETCH_HEAD"]):
+                output = "b" * 40 + "\n"
+            elif command[1:3] == ["bundle", "list-heads"]:
+                output = "b" * 40 + " HEAD\n"
             return __import__("subprocess").CompletedProcess(command, 0, stdout=output)
 
         with patch.dict(os.environ, {"SYMPHONY_CONTROL_ROOT": str(ROOT),
@@ -100,14 +105,18 @@ class ValidationTests(unittest.TestCase):
                          str(ROOT / "scripts/symphony/git-askpass.sh"))
         commands = [call.args[0] for call in run.call_args_list]
         bundle_command = next(command for command in commands if "bundle" in command)
-        self.assertEqual(bundle_command[-4:], ["bundle", "create", "-", "b" * 40])
+        self.assertEqual(bundle_command[-4:], ["bundle", "create", "-", "HEAD"])
         fetch_command = next(command for command in commands if "fetch" in command)
         self.assertTrue(fetch_command[-2].endswith("/source.bundle"))
         self.assertNotEqual(fetch_command[-2], str(ROOT))
 
     def test_root_push_bundles_workspace_as_agent(self):
         def completed(command, **_kwargs):
-            output = "b" * 40 + "\n" if command[-2:] == ["rev-parse", "FETCH_HEAD"] else ""
+            output = ""
+            if command[-2:] in (["rev-parse", "HEAD"], ["rev-parse", "FETCH_HEAD"]):
+                output = "b" * 40 + "\n"
+            elif command[1:3] == ["bundle", "list-heads"]:
+                output = "b" * 40 + " HEAD\n"
             return __import__("subprocess").CompletedProcess(command, 0, stdout=output)
 
         with patch.object(review.os, "geteuid", return_value=0), \
@@ -122,7 +131,48 @@ class ValidationTests(unittest.TestCase):
         bundle_command = next(command for command in commands if "bundle" in command)
         self.assertEqual(bundle_command[:4], ["setpriv", "--reuid=1234",
                          "--regid=5678", "--clear-groups"])
-        self.assertEqual(bundle_command[-4:], ["bundle", "create", "-", "b" * 40])
+        self.assertEqual(bundle_command[-4:], ["bundle", "create", "-", "HEAD"])
+
+    def test_bundle_creation_uses_exportable_head_and_contains_exact_commit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory) / "repository"
+            bundle = Path(directory) / "source.bundle"
+            env = review.credential_free_env()
+            subprocess.run(["git", "init", "-q", str(repository)], check=True, env=env)
+            subprocess.run(["git", "-C", str(repository), "config", "user.name", "Fixture"],
+                           check=True, env=env)
+            subprocess.run(["git", "-C", str(repository), "config", "user.email",
+                            "fixture@example.invalid"], check=True, env=env)
+            (repository / "fixture").write_text("content\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(repository), "add", "fixture"],
+                           check=True, env=env)
+            subprocess.run(["git", "-C", str(repository), "commit", "-q", "-m", "fixture"],
+                           check=True, env=env)
+            commit = subprocess.run(["git", "-C", str(repository), "rev-parse", "HEAD"],
+                                    check=True, env=env, text=True,
+                                    stdout=subprocess.PIPE).stdout.strip()
+
+            review.create_bundle(repository, commit, bundle)
+
+            heads = subprocess.run(["git", "bundle", "list-heads", str(bundle)], check=True,
+                                   env=env, text=True,
+                                   stdout=subprocess.PIPE).stdout.splitlines()
+            self.assertIn(f"{commit} HEAD", heads)
+
+    def test_bundle_creation_rejects_an_advertised_head_mismatch(self):
+        completed = __import__("subprocess").CompletedProcess
+
+        def run(command, **_kwargs):
+            if command[-2:] == ["rev-parse", "HEAD"]:
+                return completed(command, 0, stdout="b" * 40 + "\n")
+            if command[1:3] == ["bundle", "list-heads"]:
+                return completed(command, 0, stdout="c" * 40 + " HEAD\n")
+            return completed(command, 0, stdout="")
+
+        with tempfile.TemporaryDirectory() as directory, \
+                patch("subprocess.run", side_effect=run):
+            with self.assertRaisesRegex(review.ReviewStopped, "bundle HEAD"):
+                review.create_bundle(ROOT, "b" * 40, Path(directory) / "source.bundle")
 
     def test_root_review_drops_to_the_configured_workspace_owner(self):
         with patch("os.geteuid", return_value=0), \

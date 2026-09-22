@@ -167,7 +167,14 @@ chmod 0700 "$trusted_push_dir"
 trusted_bundle="$trusted_push_dir/source.bundle"
 # The trusted shell opens the root-owned destination. Git reads the agent-owned
 # repository as the agent and inherits only that already-open output descriptor.
-trusted_git_read bundle create - "$published_commit" >"$trusted_bundle"
+trusted_git_read bundle create - HEAD >"$trusted_bundle"
+[ "$(env -u SYMPHONY_GITHUB_TOKEN -u GH_TOKEN -u GITHUB_TOKEN -u SSH_AUTH_SOCK \
+  -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_INDEX_FILE \
+  GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+  git bundle list-heads "$trusted_bundle")" = "$published_commit HEAD" ] || \
+  die "trusted bundle HEAD does not match validated commit"
+[ "$(trusted_git_read rev-parse HEAD)" = "$published_commit" ] || \
+  die "workspace HEAD changed while creating trusted bundle"
 chmod 0600 "$trusted_bundle"
 env -u SYMPHONY_GITHUB_TOKEN -u GH_TOKEN -u GITHUB_TOKEN -u SSH_AUTH_SOCK \
   GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
