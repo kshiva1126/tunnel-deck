@@ -101,6 +101,8 @@ if name == "gh":
     else: sys.exit(3)
 elif name == "git":
     command = args[2:]
+    while command[:1] == ["-c"]:
+        command = command[2:]
     if command[:2] == ["branch", "--show-current"]: print("symphony/issue-24")
     elif command[:2] == ["remote", "get-url"]: print("https://github.com/kshiva1126/tunnel-deck.git")
     elif command[:2] == ["rev-list", "--count"]: print("1")
@@ -269,6 +271,10 @@ class HookTests(unittest.TestCase):
         # The real publish hook runs required Rust commands on a tiny offline
         # crate. Git/GitHub are fakes, so no push or external write can occur.
         (self.workspace / "Cargo.toml").write_text('[package]\nname="gate-fixture"\nversion="0.1.0"\nedition="2021"\n')
+        (self.workspace / "build.rs").write_text(
+            'fn main() {\n    for key in [\n        "SYMPHONY_GITHUB_TOKEN",\n'
+            '        "GH_TOKEN",\n        "GITHUB_TOKEN",\n        "SSH_AUTH_SOCK",\n'
+            '    ] {\n        assert!(std::env::var_os(key).is_none());\n    }\n}\n')
         (self.workspace / "src").mkdir()
         (self.workspace / "src/lib.rs").write_text('pub fn fixture() -> bool {\n    true\n}\n')
         run_report.write_initial(self.workspace, 24, "GH-24-fixture")
@@ -362,7 +368,7 @@ class HookTests(unittest.TestCase):
         self.assertEqual(before.returncode, 0, before.stderr)
         self.assertEqual(after.returncode, 0, after.stderr)
         self.assertTrue((self.root / "codex-ran").exists())
-        self.assertIn("push --set-upstream", self.calls())
+        self.assertIn("push --no-verify https://github.com/kshiva1126/tunnel-deck.git", self.calls())
         self.assertEqual(self.calls().count("gh pr create"), 1)
         calls = self.calls()
         self.attempt()
@@ -645,7 +651,8 @@ class HookTests(unittest.TestCase):
                 self.assertEqual(after.returncode, 0, after.stderr)
                 self.assertTrue((self.root / "codex-ran").exists())
                 self.assertIn("/dependencies/blocked_by", self.calls())
-                self.assertEqual(self.calls().count("push --set-upstream"), 1)
+                self.assertEqual(self.calls().count(
+                    "push --no-verify https://github.com/kshiva1126/tunnel-deck.git"), 1)
                 self.assertEqual(self.calls().count("gh pr create"), 1)
                 self.assertFalse((self.root / "state/GH-24.permit").exists())
                 self.assertIn("published", (self.root / "state/GH-24.stopped").read_text())

@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -18,7 +19,8 @@ SPEC.loader.exec_module(review)
 
 def pr(sha="a" * 40, state="open", head="symphony/issue-28", fork=False):
     return {"number": 99, "state": state, "merged": False, "body": "Refs #28",
-            "base": {"ref": "main", "repo": {"full_name": review.REPO}},
+            "base": {"ref": "main", "sha": "d" * 40,
+                     "repo": {"full_name": review.REPO}},
             "head": {"ref": head, "sha": sha,
                      "repo": {"full_name": "someone/fork" if fork else review.REPO}}}
 
@@ -33,17 +35,23 @@ class ValidationTests(unittest.TestCase):
                     review.expected_pr(28, 99, "a" * 40)
 
     def test_required_checks_fail_closed_when_missing_or_failed(self):
-        success = {"name": "Linux", "status": "completed", "conclusion": "success"}
+        success = {"id": 1, "name": "Linux", "status": "completed", "conclusion": "success"}
         with patch.dict(os.environ, {"SYMPHONY_REQUIRED_CHECKS": "Linux,macOS"}), \
                 patch.object(review, "one", return_value={"check_runs": [success]}):
             self.assertEqual(review.check_state("a" * 40)[0], "pending")
-        failed = {"name": "macOS", "status": "completed", "conclusion": "failure",
+        failed = {"id": 2, "name": "macOS", "status": "completed", "conclusion": "failure",
                   "output": {"title": "test failed", "summary": "bounded diagnostic"}}
         with patch.dict(os.environ, {"SYMPHONY_REQUIRED_CHECKS": "Linux,macOS"}), \
                 patch.object(review, "one", return_value={"check_runs": [success, failed]}):
             state, failures, _ = review.check_state("a" * 40)
             self.assertEqual(state, "failed")
             self.assertEqual(review.failed_logs(failures)[0]["check"], "macOS")
+        for value in ("", ",,", "Linux,Linux"):
+            with self.subTest(value=value), patch.dict(
+                    os.environ, {"SYMPHONY_REQUIRED_CHECKS": value}), \
+                    patch.object(review, "one", return_value={"check_runs": [success]}):
+                with self.assertRaises(review.ReviewStopped):
+                    review.check_state("a" * 40)
 
     def test_context_rejects_credentials_before_codex(self):
         context = {"review": "github_pat_" + "x" * 30}
@@ -51,6 +59,47 @@ class ValidationTests(unittest.TestCase):
             with self.assertRaises(review.ReviewStopped):
                 review.remediation(ROOT, context)
             run.assert_not_called()
+
+    def test_remediation_pins_sol_and_strips_remote_credentials(self):
+        completed = __import__("subprocess").CompletedProcess([], 0)
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.dict(os.environ, {"SYMPHONY_GITHUB_TOKEN": "secret",
+                                        "GH_TOKEN": "secret", "SSH_AUTH_SOCK": "/agent"}), \
+                patch("subprocess.run", return_value=completed) as run:
+            review.remediation(Path(directory), {"kind": "untrusted_diagnostics"})
+        command = run.call_args.args[0]
+        child_env = run.call_args.kwargs["env"]
+        self.assertEqual(command[:4], ["codex", "exec", "-c", 'model=gpt-5.6-sol'])
+        for key in ("SYMPHONY_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN", "SSH_AUTH_SOCK"):
+            self.assertNotIn(key, child_env)
+
+    def test_push_uses_trusted_noninteractive_askpass(self):
+        completed = __import__("subprocess").CompletedProcess([], 0)
+        with patch.dict(os.environ, {"SYMPHONY_CONTROL_ROOT": str(ROOT),
+                                    "SYMPHONY_GITHUB_TOKEN": "secret"}), \
+                patch("subprocess.run", return_value=completed) as run:
+            review.push(ROOT, 28, "b" * 40, "a" * 40)
+        command = run.call_args.args[0]
+        self.assertEqual(command[-3:], [
+            "--force-with-lease=refs/heads/symphony/issue-28:" + "a" * 40,
+            f"https://github.com/{review.REPO}.git",
+            "b" * 40 + ":refs/heads/symphony/issue-28"])
+        self.assertIn("core.hooksPath=/dev/null", command)
+        self.assertIn("credential.helper=", command)
+        push_env = run.call_args.kwargs["env"]
+        self.assertEqual(push_env["GIT_TERMINAL_PROMPT"], "0")
+        self.assertEqual(push_env["GIT_ASKPASS"],
+                         str(ROOT / "scripts/symphony/git-askpass.sh"))
+
+    def test_root_review_drops_to_the_configured_workspace_owner(self):
+        with patch("os.geteuid", return_value=0), \
+                patch.dict(os.environ, {"SYMPHONY_AGENT_UID": "1234",
+                                        "SYMPHONY_AGENT_GID": "5678"}):
+            self.assertEqual(review.agent_prefix(), ["setpriv", "--reuid=1234",
+                             "--regid=5678", "--clear-groups"])
+        with patch("os.geteuid", return_value=0), patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(review.ReviewStopped):
+                review.agent_prefix()
 
     def test_unresolved_coderabbit_line_comment_keeps_location_and_sha(self):
         response = {"data": {"repository": {"pullRequest": {"reviewThreads": {
@@ -60,9 +109,30 @@ class ValidationTests(unittest.TestCase):
                     "commit": {"oid": "a" * 40}, "author": {"login": "coderabbitai[bot]"}}]}}]}}}}}
         completed = __import__("subprocess").CompletedProcess([], 0, json.dumps(response), "")
         with patch.dict(os.environ, {"SYMPHONY_GITHUB_TOKEN": "test-token"}), \
-                patch("subprocess.run", return_value=completed):
-            self.assertEqual(review.review_threads(99), [{"body": "actionable finding",
-                "path": "src/lib.rs", "line": 7, "commit_sha": "a" * 40}])
+                patch("subprocess.run", return_value=completed), \
+                patch.object(review, "api", return_value=[[]]):
+            self.assertEqual(review.review_findings(99, "a" * 40), [{
+                "body": "actionable finding", "path": "src/lib.rs", "line": 7,
+                "commit_sha": "a" * 40}])
+
+    def test_current_head_actionable_review_body_is_a_finding(self):
+        response = {"data": {"repository": {"pullRequest": {"reviewThreads": {
+            "pageInfo": {"hasNextPage": False}, "nodes": []}}}}}
+        completed = __import__("subprocess").CompletedProcess([], 0, json.dumps(response), "")
+        reviews = [[{"id": 7, "body": "**Actionable comments posted: 2**",
+                    "commit_id": "a" * 40, "user": {"login": "coderabbitai"}}]]
+        with patch.dict(os.environ, {"SYMPHONY_GITHUB_TOKEN": "test-token"}), \
+                patch("subprocess.run", return_value=completed), \
+                patch.object(review, "api", return_value=reviews):
+            findings = review.review_findings(99, "a" * 40)
+        self.assertEqual(findings[0]["source"], "review_body")
+
+    def test_failure_fingerprint_ignores_head_and_finding_commit(self):
+        first = {"head_sha": "a" * 40, "failed_checks": [{"check": "Linux"}],
+                 "review_findings": [{"body": "same", "commit_sha": "a" * 40}]}
+        second = {"head_sha": "b" * 40, "failed_checks": [{"check": "Linux"}],
+                  "review_findings": [{"body": "same", "commit_sha": "b" * 40}]}
+        self.assertEqual(review.fingerprint(first), review.fingerprint(second))
 
 
 class StateMachineTests(unittest.TestCase):
@@ -70,7 +140,7 @@ class StateMachineTests(unittest.TestCase):
         return (patch.object(review, "expected_pr", return_value=pr()),
                 patch.object(review, "open_dependencies", return_value=[]),
                 patch.object(review, "risk_reason", return_value=None),
-                patch.object(review, "review_threads", return_value=[]),
+                patch.object(review, "review_findings", return_value=[]),
                 patch.object(review, "review_state", return_value=(Path("state"), {
                     "issue": 28, "pull_request": 99, "started": __import__("time").time(),
                     "attempts": 0, "fingerprint": None})))
@@ -106,10 +176,11 @@ class StateMachineTests(unittest.TestCase):
         p1, p2, p3, p4, p5 = self.base_patches()
         with p1, p2, p3, p4, p5, patch.object(review, "check_state", return_value=("failed", failed, [])), \
                 patch.object(review, "git", side_effect=["a" * 40, "symphony/issue-28",
-                                                         "b" * 40, "", "b" * 40,
-                                                         "symphony/issue-28"]), \
+                                                         "b" * 40, "", "b" * 40, "",
+                                                         "fixture change"]), \
                 patch.object(review, "remediation") as remediate, \
                 patch.object(review, "local_verify"), patch("subprocess.run"), \
+                patch.object(review, "push"), \
                 patch.object(review, "record"), patch.object(review, "save_state"), \
                 patch.object(review, "transition_issue", side_effect=review.ReviewStopped("repeat")):
             with self.assertRaisesRegex(review.ReviewStopped, "repeat"):
