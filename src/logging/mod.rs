@@ -28,7 +28,7 @@ impl RotatingLog {
     /// Writes an application-owned message. Callers must pass classified,
     /// fixed text rather than captured SSH output or environment values.
     pub fn write(&self, level: &str, message: &str) -> io::Result<()> {
-        let line = format!("{level}\t{}\n", single_line(message));
+        let line = format!("{}\t{}\n", single_line(level), single_line(message));
         if fs::metadata(&self.path)
             .map(|m| m.len() + line.len() as u64 > self.max_bytes)
             .unwrap_or(false)
@@ -69,7 +69,9 @@ impl RotatingLog {
 }
 
 fn rotated(path: &Path, index: usize) -> PathBuf {
-    PathBuf::from(format!("{}.{}", path.display(), index))
+    let mut value = path.as_os_str().to_os_string();
+    value.push(format!(".{index}"));
+    PathBuf::from(value)
 }
 fn validate_log(path: &Path) -> io::Result<()> {
     match fs::symlink_metadata(path) {
@@ -113,9 +115,22 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("app.log");
         let log = RotatingLog::new(&path, 12, 2);
-        log.write("info", "first\nline").unwrap();
+        log.write("info\nforged", "first\nline").unwrap();
         log.write("info", "second").unwrap();
         assert!(rotated(&path, 1).exists());
         assert!(!fs::read_to_string(&path).unwrap().contains('\r'));
+        assert!(
+            !fs::read_to_string(rotated(&path, 1))
+                .unwrap()
+                .contains("\nforged")
+        );
+    }
+
+    #[test]
+    fn rotated_path_preserves_non_utf8_bytes() {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+        let path = PathBuf::from(std::ffi::OsString::from_vec(b"log-\xff".to_vec()));
+        assert_eq!(rotated(&path, 2).as_os_str().as_bytes(), b"log-\xff.2");
     }
 }

@@ -262,9 +262,9 @@ impl Form {
                 RuleId::from_uuid(self.id),
                 self.name.clone(),
                 self.host.clone(),
-                local,
-                LOOPBACK,
                 remote,
+                LOOPBACK,
+                local,
             ),
             "dynamic" => Rule::dynamic(
                 RuleId::from_uuid(self.id),
@@ -292,10 +292,11 @@ impl Form {
             ));
             return None;
         }
-        let mut value = json!({"kind":self.kind,"id":self.id,"name":self.name,"ssh_host_alias":self.host,"bind_address":LOOPBACK,"bind_port":local,"auto_start":self.auto_start,"reconnect":self.reconnect});
+        let bind_port = if self.kind == "remote" { remote } else { local };
+        let mut value = json!({"kind":self.kind,"id":self.id,"name":self.name,"ssh_host_alias":self.host,"bind_address":LOOPBACK,"bind_port":bind_port,"auto_start":self.auto_start,"reconnect":self.reconnect});
         if self.kind != "dynamic" {
             value["destination_host"] = json!(LOOPBACK);
-            value["destination_port"] = json!(remote);
+            value["destination_port"] = json!(if self.kind == "remote" { local } else { remote });
         }
         Some(value)
     }
@@ -899,6 +900,19 @@ mod tests {
         assert!(form.payload().is_none());
         form.accept_suggestion();
         assert!(form.payload().is_none(), "name remains required")
+    }
+    #[test]
+    fn remote_form_maps_remote_listener_to_local_destination() {
+        let mut form = Form::new("dev".into());
+        form.kind = "remote";
+        form.name = "callback".into();
+        form.remote_port = "9000".into();
+        form.local_port = "3000".into();
+
+        let payload = form.payload().expect("valid remote forwarding");
+
+        assert_eq!(payload["bind_port"], 9000);
+        assert_eq!(payload["destination_port"], 3000);
     }
     #[test]
     fn suggestion_shortcut_does_not_consume_a_in_the_name_field() {
