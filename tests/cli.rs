@@ -50,6 +50,23 @@ fn help_completion_and_manpage_cover_the_same_primary_commands() {
 }
 
 #[test]
+fn generated_artifacts_honor_json_output() {
+    for (arguments, kind) in [
+        (["--json", "completion", "bash"].as_slice(), "completion"),
+        (["--json", "manpage"].as_slice(), "manpage"),
+    ] {
+        let output = tdeck()
+            .args(arguments)
+            .output()
+            .expect("generate JSON artifact");
+        assert!(output.status.success());
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["kind"], kind);
+        assert!(!value["content"].as_str().unwrap().is_empty());
+    }
+}
+
+#[test]
 fn host_list_uses_an_isolated_ssh_fixture() {
     let fixture_home =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ssh_home");
