@@ -309,6 +309,13 @@ Exit criteria:
 
 ## Milestone 4 — forwarding parity and recovery
 
+Implementation status: Remote and Dynamic forwarding, daemon-owned auto-start
+and reconnect scheduling, redacted rule diagnostics, uptime/reconnect counters,
+and a bounded rotation primitive are implemented in GH-8. Versioned settings
+persistence and UI/CLI settings are tracked in GH-42; connecting the configured
+log level and daemon events to rotation is tracked in GH-43. The parent issue
+remains open until those follow-ups are complete.
+
 Tasks:
 
 - Add Remote and Dynamic OpenSSH argument construction and controls.

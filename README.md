@@ -38,6 +38,8 @@ The CLI remains available for automation:
 tdeck                         Open the TUI
 tdeck host list               List discovered SSH hosts
 tdeck forward add --name web --host server --bind-port 3000 --destination-port 3000
+tdeck forward add --kind remote --name callback --host server --bind-port 9000 --destination-port 9000
+tdeck forward add --kind dynamic --name socks --host server --bind-port 1080
 tdeck forward list            List forwarding rules
 tdeck forward start <name-or-uuid>    Start a rule
 tdeck forward stop <name-or-uuid>     Stop a rule

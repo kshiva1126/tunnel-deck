@@ -33,6 +33,76 @@ pub enum ProcessError {
     Startup(String),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticKind {
+    Authentication,
+    HostKey,
+    Listener,
+    Network,
+    RemoteRejected,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Diagnostic {
+    pub kind: DiagnosticKind,
+    pub message: &'static str,
+    pub retryable: bool,
+}
+
+/// Classifies only well-known OpenSSH text and returns a fixed, redacted
+/// message. Unknown output is never guessed or returned to clients.
+pub fn classify_diagnostic(value: &str) -> Diagnostic {
+    let lower = value.to_ascii_lowercase();
+    if lower.contains("permission denied") || lower.contains("authentication failed") {
+        Diagnostic {
+            kind: DiagnosticKind::Authentication,
+            message: "SSH authentication failed",
+            retryable: false,
+        }
+    } else if lower.contains("host key verification failed")
+        || lower.contains("remote host identification has changed")
+    {
+        Diagnostic {
+            kind: DiagnosticKind::HostKey,
+            message: "SSH host-key verification failed",
+            retryable: false,
+        }
+    } else if lower.contains("remote port forwarding failed")
+        || lower.contains("administratively prohibited")
+    {
+        Diagnostic {
+            kind: DiagnosticKind::RemoteRejected,
+            message: "the SSH server rejected remote forwarding",
+            retryable: false,
+        }
+    } else if lower.contains("address already in use") || lower.contains("cannot listen to port") {
+        Diagnostic {
+            kind: DiagnosticKind::Listener,
+            message: "the requested listener could not be created",
+            retryable: false,
+        }
+    } else if lower.contains("connection timed out")
+        || lower.contains("connection refused")
+        || lower.contains("no route to host")
+        || lower.contains("connection reset")
+        || lower.contains("network is unreachable")
+    {
+        Diagnostic {
+            kind: DiagnosticKind::Network,
+            message: "the SSH network connection failed",
+            retryable: true,
+        }
+    } else {
+        Diagnostic {
+            kind: DiagnosticKind::Unknown,
+            message: "SSH startup failed for an unclassified reason",
+            retryable: false,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct GuardianSpec {
     ssh: PathBuf,
@@ -545,6 +615,17 @@ mod tests {
     use super::*;
     use crate::domain::rule::{Rule, RuleId};
     #[test]
+    fn diagnostics_are_classified_without_echoing_captured_secrets() {
+        let secret = "private-token-value";
+        let auth = classify_diagnostic(&format!("Permission denied {secret}"));
+        assert_eq!(auth.kind, DiagnosticKind::Authentication);
+        assert!(!auth.message.contains(secret));
+        assert!(!auth.retryable);
+        let unknown = classify_diagnostic(&format!("unexpected detail {secret}"));
+        assert_eq!(unknown.kind, DiagnosticKind::Unknown);
+        assert!(!unknown.message.contains(secret));
+    }
+    #[test]
     fn local_forward_spec_brackets_ipv6() {
         let rule = Rule::local(RuleId::new(), "web", "work", 3000, "::1", 80)
             .unwrap()
@@ -554,6 +635,22 @@ mod tests {
             forwarding(&rule),
             ("-L".into(), "[::1]:3000:[::1]:80".into())
         );
+    }
+    #[test]
+    fn remote_and_dynamic_forward_specs_use_their_own_flags() {
+        let remote = Rule::remote(RuleId::new(), "remote", "work", 8080, "::1", 80)
+            .unwrap()
+            .with_bind_address("0.0.0.0")
+            .unwrap();
+        assert_eq!(
+            forwarding(&remote),
+            ("-R".into(), "0.0.0.0:8080:[::1]:80".into())
+        );
+        let dynamic = Rule::dynamic(RuleId::new(), "socks", "work", 1080)
+            .unwrap()
+            .with_bind_address("::1")
+            .unwrap();
+        assert_eq!(forwarding(&dynamic), ("-D".into(), "[::1]:1080".into()));
     }
     #[test]
     fn stderr_is_bounded_while_fully_drained() {

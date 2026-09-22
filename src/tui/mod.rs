@@ -61,6 +61,12 @@ struct RuleView {
     bind_port: u16,
     destination_port: Option<u16>,
     state: String,
+    kind: &'static str,
+    auto_start: bool,
+    reconnect: bool,
+    uptime_seconds: u64,
+    reconnect_count: u64,
+    last_error: Option<String>,
 }
 impl RuleView {
     fn from_wire(rule: WireRule) -> Self {
@@ -72,15 +78,8 @@ impl RuleView {
                 bind_address,
                 bind_port,
                 destination_port,
-                ..
-            }
-            | WireRule::Remote {
-                id,
-                name,
-                ssh_host_alias,
-                bind_address,
-                bind_port,
-                destination_port,
+                auto_start,
+                reconnect,
                 ..
             } => Self {
                 id,
@@ -90,6 +89,37 @@ impl RuleView {
                 bind_port,
                 destination_port: Some(destination_port),
                 state: "stopped".into(),
+                kind: "local",
+                auto_start,
+                reconnect,
+                uptime_seconds: 0,
+                reconnect_count: 0,
+                last_error: None,
+            },
+            WireRule::Remote {
+                id,
+                name,
+                ssh_host_alias,
+                bind_address,
+                bind_port,
+                destination_port,
+                auto_start,
+                reconnect,
+                ..
+            } => Self {
+                id,
+                name,
+                host: ssh_host_alias,
+                bind_address,
+                bind_port,
+                destination_port: Some(destination_port),
+                state: "stopped".into(),
+                kind: "remote",
+                auto_start,
+                reconnect,
+                uptime_seconds: 0,
+                reconnect_count: 0,
+                last_error: None,
             },
             WireRule::Dynamic {
                 id,
@@ -97,7 +127,8 @@ impl RuleView {
                 ssh_host_alias,
                 bind_address,
                 bind_port,
-                ..
+                auto_start,
+                reconnect,
             } => Self {
                 id,
                 name,
@@ -106,6 +137,12 @@ impl RuleView {
                 bind_port,
                 destination_port: None,
                 state: "stopped".into(),
+                kind: "dynamic",
+                auto_start,
+                reconnect,
+                uptime_seconds: 0,
+                reconnect_count: 0,
+                last_error: None,
             },
         }
     }
@@ -130,6 +167,9 @@ struct Form {
     field: usize,
     suggestion: Option<u16>,
     error: Option<String>,
+    kind: &'static str,
+    auto_start: bool,
+    reconnect: bool,
 }
 impl Form {
     fn new(host: String) -> Self {
@@ -143,6 +183,9 @@ impl Form {
             field: 0,
             suggestion: None,
             error: None,
+            kind: "local",
+            auto_start: false,
+            reconnect: false,
         }
     }
     fn edit(rule: &RuleView) -> Self {
@@ -159,6 +202,9 @@ impl Form {
             field: 0,
             suggestion: None,
             error: None,
+            kind: rule.kind,
+            auto_start: rule.auto_start,
+            reconnect: rule.reconnect,
         }
     }
     fn duplicate(rule: &RuleView) -> Self {
@@ -211,27 +257,47 @@ impl Form {
     fn payload(&mut self) -> Option<Value> {
         let remote = self.remote_port.parse::<u16>().ok().unwrap_or(0);
         let local = self.local_port.parse::<u16>().ok().unwrap_or(0);
-        if let Err(e) = Rule::local(
-            RuleId::from_uuid(self.id),
-            self.name.clone(),
-            self.host.clone(),
-            local,
-            LOOPBACK,
-            remote,
-        ) {
+        let validation = match self.kind {
+            "remote" => Rule::remote(
+                RuleId::from_uuid(self.id),
+                self.name.clone(),
+                self.host.clone(),
+                local,
+                LOOPBACK,
+                remote,
+            ),
+            "dynamic" => Rule::dynamic(
+                RuleId::from_uuid(self.id),
+                self.name.clone(),
+                self.host.clone(),
+                local,
+            ),
+            _ => Rule::local(
+                RuleId::from_uuid(self.id),
+                self.name.clone(),
+                self.host.clone(),
+                local,
+                LOOPBACK,
+                remote,
+            ),
+        };
+        if let Err(e) = validation {
             self.error = Some(e.to_string());
             return None;
         }
-        if !port_available(LOOPBACK, local) {
+        if self.kind != "remote" && !port_available(LOOPBACK, local) {
             self.suggestion = next_available_port(LOOPBACK, local);
             self.error = Some(format!(
                 "ローカルポート {local} は使用中です。候補を選択してください"
             ));
             return None;
         }
-        Some(
-            json!({"kind":"local","id":self.id,"name":self.name,"ssh_host_alias":self.host,"bind_address":LOOPBACK,"bind_port":local,"destination_host":LOOPBACK,"destination_port":remote,"auto_start":false,"reconnect":false}),
-        )
+        let mut value = json!({"kind":self.kind,"id":self.id,"name":self.name,"ssh_host_alias":self.host,"bind_address":LOOPBACK,"bind_port":local,"auto_start":self.auto_start,"reconnect":self.reconnect});
+        if self.kind != "dynamic" {
+            value["destination_host"] = json!(LOOPBACK);
+            value["destination_port"] = json!(remote);
+        }
+        Some(value)
     }
 }
 
@@ -336,7 +402,10 @@ impl Service {
                         state["state"].as_str(),
                     ) {
                         if let Some(rule) = rules.iter_mut().find(|r| r.id == id) {
-                            rule.state = value.into()
+                            rule.state = value.into();
+                            rule.uptime_seconds = state["uptime_seconds"].as_u64().unwrap_or(0);
+                            rule.reconnect_count = state["reconnect_count"].as_u64().unwrap_or(0);
+                            rule.last_error = state["last_error"].as_str().map(str::to_owned);
                         }
                     }
                 }
@@ -460,6 +529,15 @@ fn handle_key(app: &mut App, key: KeyEvent, service: &Service, catalog: &mut Hos
             KeyCode::Char('a') if form.field != 0 && form.suggestion.is_some() => {
                 form.accept_suggestion()
             }
+            KeyCode::F(2) => {
+                form.kind = match form.kind {
+                    "local" => "remote",
+                    "remote" => "dynamic",
+                    _ => "local",
+                }
+            }
+            KeyCode::F(3) => form.auto_start = !form.auto_start,
+            KeyCode::F(4) => form.reconnect = !form.reconnect,
             KeyCode::Char(ch) => form.input(ch),
             KeyCode::Enter => {
                 if let Some(payload) = form.payload() {
@@ -673,7 +751,7 @@ fn render_hosts(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     )
 }
 fn render_detail(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
-    let text=app.selected().map(|r|format!("名前: {}\nホスト: {}\n状態: {}\nLocal: {}:{} → 127.0.0.1:{}\nURL: {}\n\nh: HTTPで開く  s: HTTPSで開く",r.name,r.host,r.state,r.bind_address,r.bind_port,r.destination_port.unwrap_or(0),r.url("http"))).unwrap_or_else(||"転送がありません".into());
+    let text=app.selected().map(|r|format!("名前: {}\n種別: {}\nホスト: {}\n状態: {}\n待受: {}:{} / 宛先ポート: {}\n稼働時間: {}秒 / 再接続: {}回\n最終診断: {}\nURL: {}\n\nh: HTTPで開く  s: HTTPSで開く",r.name,r.kind,r.host,r.state,r.bind_address,r.bind_port,r.destination_port.map(|v|v.to_string()).unwrap_or_else(||"-".into()),r.uptime_seconds,r.reconnect_count,r.last_error.as_deref().unwrap_or("-"),r.url("http"))).unwrap_or_else(||"転送がありません".into());
     frame.render_widget(
         Paragraph::new(text).block(Block::default().title("詳細").borders(Borders::ALL)),
         area,
@@ -695,6 +773,7 @@ fn render_form(frame: &mut ratatui::Frame<'_>, area: Rect, form: &Form) {
     let marker = |f| if form.field == f { ">" } else { " " };
     let mut lines = vec![
         Line::from(format!("ホスト: {}", form.host)),
+        Line::from(format!("種別: {} (F2で変更)", form.kind)),
         Line::from(format!("{} 名前: {}", marker(0), form.name)),
         Line::from(format!(
             "{} リモートポート: {}",
@@ -702,7 +781,10 @@ fn render_form(frame: &mut ratatui::Frame<'_>, area: Rect, form: &Form) {
             form.remote_port
         )),
         Line::from(format!("{} ローカルポート: {}", marker(2), form.local_port)),
-        Line::from("Local / remote 127.0.0.1 / local 127.0.0.1"),
+        Line::from(format!(
+            "auto_start: {} (F3) / reconnect: {} (F4)",
+            form.auto_start, form.reconnect
+        )),
         Line::from("Tab: 項目移動  Enter: 保存して起動  Esc: キャンセル"),
     ];
     if let Some(port) = form.suggestion {
@@ -853,6 +935,12 @@ mod tests {
             bind_port: 3000,
             destination_port: Some(3000),
             state: "stopped".into(),
+            kind: "local",
+            auto_start: false,
+            reconnect: false,
+            uptime_seconds: 0,
+            reconnect_count: 0,
+            last_error: None,
         };
         let first = Uuid::new_v4();
         let second = Uuid::new_v4();
@@ -883,6 +971,12 @@ mod tests {
             bind_port: 3000,
             destination_port: Some(3000),
             state: "active".into(),
+            kind: "local",
+            auto_start: false,
+            reconnect: false,
+            uptime_seconds: 1,
+            reconnect_count: 0,
+            last_error: None,
         };
         assert_eq!(rule.url("https"), "https://[::1]:3000")
     }
