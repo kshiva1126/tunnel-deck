@@ -26,7 +26,7 @@ use crate::{
     name = "tdeck",
     version,
     about = "Manage SSH port forwarding",
-    long_about = "TunnelDeck manages SSH hosts and Local forwarding through a per-user daemon and scriptable CLI.\n\nThe terminal UI and additional forwarding types remain in development."
+    long_about = "TunnelDeck manages SSH hosts and Local forwarding through a terminal UI, per-user daemon, and scriptable CLI.\n\nAdditional forwarding types remain in development."
 )]
 pub struct Cli {
     /// Emit one JSON value for automation
@@ -134,54 +134,50 @@ struct GuardianArgs {
 impl Cli {
     pub fn execute(self) -> Result<(), AppError> {
         let json_output = self.json;
-        let feature = match self.command {
-            None => "TUI",
-            Some(Command::Host { command }) => return execute_host(command, json_output),
+        match self.command {
+            None => crate::tui::run(),
+            Some(Command::Host { command }) => execute_host(command, json_output),
             Some(Command::Forward { command }) => match command {
                 ForwardCommand::List => {
-                    return daemon_call(Operation::ForwardList, serde_json::json!({}), json_output);
+                    daemon_call(Operation::ForwardList, serde_json::json!({}), json_output)
                 }
-                ForwardCommand::Add(args) => {
-                    return daemon_call(
-                        Operation::ForwardAdd,
-                        serde_json::json!({
-                            "kind": "local",
-                            "id": uuid::Uuid::new_v4(),
-                            "name": args.name,
-                            "ssh_host_alias": args.ssh_host_alias,
-                            "bind_address": args.bind_address,
-                            "bind_port": args.bind_port,
-                            "destination_host": args.destination_host,
-                            "destination_port": args.destination_port,
-                            "auto_start": args.auto_start,
-                            "reconnect": args.reconnect,
-                        }),
-                        json_output,
-                    );
-                }
+                ForwardCommand::Add(args) => daemon_call(
+                    Operation::ForwardAdd,
+                    serde_json::json!({
+                        "kind": "local",
+                        "id": uuid::Uuid::new_v4(),
+                        "name": args.name,
+                        "ssh_host_alias": args.ssh_host_alias,
+                        "bind_address": args.bind_address,
+                        "bind_port": args.bind_port,
+                        "destination_host": args.destination_host,
+                        "destination_port": args.destination_port,
+                        "auto_start": args.auto_start,
+                        "reconnect": args.reconnect,
+                    }),
+                    json_output,
+                ),
                 ForwardCommand::Remove(args) => {
-                    return daemon_rule_call(Operation::ForwardRemove, args.rule, json_output);
+                    daemon_rule_call(Operation::ForwardRemove, args.rule, json_output)
                 }
                 ForwardCommand::Start(args) => {
-                    return daemon_rule_call(Operation::ForwardStart, args.rule, json_output);
+                    daemon_rule_call(Operation::ForwardStart, args.rule, json_output)
                 }
                 ForwardCommand::Stop(args) => {
-                    return daemon_rule_call(Operation::ForwardStop, args.rule, json_output);
+                    daemon_rule_call(Operation::ForwardStop, args.rule, json_output)
                 }
             },
             Some(Command::Status) => {
-                return daemon_call(Operation::Status, serde_json::json!({}), json_output);
+                daemon_call(Operation::Status, serde_json::json!({}), json_output)
             }
             Some(Command::Daemon { command }) => match command {
-                DaemonCommand::Run => return run_daemon(),
+                DaemonCommand::Run => run_daemon(),
                 DaemonCommand::Guardian(args) => {
-                    return crate::daemon::process::run_guardian(args.lease_fd, args.lock_fd)
-                        .map_err(|error| AppError::Ipc(error.to_string()));
+                    crate::daemon::process::run_guardian(args.lease_fd, args.lock_fd)
+                        .map_err(|error| AppError::Ipc(error.to_string()))
                 }
             },
-        };
-
-        Err(AppError::Unavailable { feature })
+        }
     }
 }
 
