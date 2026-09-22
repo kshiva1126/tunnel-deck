@@ -4,6 +4,8 @@ set -eu
 
 SYMPHONY_AGENT_UID=${SYMPHONY_AGENT_UID:-}
 SYMPHONY_AGENT_GID=${SYMPHONY_AGENT_GID:-}
+PATH="/usr/local/cargo/bin:$PATH"
+export PATH
 
 # These constants are consumed by scripts that source this file.
 # shellcheck disable=SC2034

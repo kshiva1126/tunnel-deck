@@ -31,7 +31,7 @@ agent:
   max_turns: 1
 
 codex:
-  command: setpriv --reuid=$SYMPHONY_AGENT_UID --regid=$SYMPHONY_AGENT_GID --clear-groups env -u SSH_AUTH_SOCK -u SYMPHONY_GITHUB_TOKEN -u GH_TOKEN -u GITHUB_TOKEN codex app-server
+  command: setpriv --reuid=$SYMPHONY_AGENT_UID --regid=$SYMPHONY_AGENT_GID --clear-groups env -u SSH_AUTH_SOCK -u SYMPHONY_GITHUB_TOKEN -u GH_TOKEN -u GITHUB_TOKEN PATH=/usr/local/cargo/bin:$PATH codex app-server
   approval_policy: never
   thread_sandbox: danger-full-access
   turn_sandbox_policy:
