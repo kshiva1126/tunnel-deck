@@ -104,6 +104,9 @@ elif name == "gh":
     elif args[:2] == ["issue", "edit"]: pass
     else: sys.exit(3)
 elif name == "git":
+    if args[:2] == ["init", "--bare"]:
+        pathlib.Path(args[2]).mkdir(parents=True, exist_ok=True)
+        sys.exit(0)
     command = args[2:]
     while command[:1] == ["-c"]:
         command = command[2:]
@@ -112,7 +115,8 @@ elif name == "git":
     elif command[:2] == ["rev-list", "--count"]: print("1")
     elif command[:1] == ["diff"]: print("fixture change")
     elif command[:1] == ["status"] and config.get("dirty"): print("?? unfinished")
-    elif command[:2] == ["rev-parse", "HEAD"]: print("a" * 40)
+    elif command[:2] in (["rev-parse", "HEAD"], ["rev-parse", "FETCH_HEAD"]): print("a" * 40)
+    elif command[:1] == ["fetch"]: pass
     elif command[:1] == ["push"]:
         if os.environ.get("FAKE_ROOT_MODE") == "1":
             assert os.environ.get("SYMPHONY_TRUSTED_PUBLISH_ONLY") == "1"

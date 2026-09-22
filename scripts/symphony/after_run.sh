@@ -13,16 +13,28 @@ if [ "$(id -u)" -eq 0 ] && [ -n "$SYMPHONY_AGENT_UID" ] \
     && [ "${SYMPHONY_VALIDATE_ONLY:-0}" != 1 ] \
     && [ "${SYMPHONY_TRUSTED_PUBLISH_ONLY:-0}" != 1 ]; then
   chown -R "$SYMPHONY_AGENT_UID:$SYMPHONY_AGENT_GID" "$workspace"
+  validated_commit=$(env -u SYMPHONY_GITHUB_TOKEN -u GH_TOKEN -u GITHUB_TOKEN \
+    -u SSH_AUTH_SOCK GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+    git -C "$workspace" -c safe.directory="$workspace" rev-parse HEAD)
+  printf '%s\n' "$validated_commit" | grep -Eq '^[0-9a-f]{40}$' || \
+    die "workspace HEAD is invalid before validation"
   set +e
   setpriv --reuid="$SYMPHONY_AGENT_UID" --regid="$SYMPHONY_AGENT_GID" --clear-groups \
     env -u SYMPHONY_GITHUB_TOKEN -u GH_TOKEN -u GITHUB_TOKEN -u SSH_AUTH_SOCK \
-    SYMPHONY_VALIDATE_ONLY=1 "$0" "$workspace"
+    SYMPHONY_VALIDATE_ONLY=1 SYMPHONY_VALIDATED_COMMIT="$validated_commit" \
+    "$0" "$workspace"
   validate_status=$?
   set -e
   [ "$validate_status" -eq 0 ] || exit "$validate_status"
+  after_validation=$(env -u SYMPHONY_GITHUB_TOKEN -u GH_TOKEN -u GITHUB_TOKEN \
+    -u SSH_AUTH_SOCK GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+    git -C "$workspace" -c safe.directory="$workspace" rev-parse HEAD)
+  [ "$after_validation" = "$validated_commit" ] || \
+    die "workspace HEAD changed during validation"
 
   # Only the root-owned parent receives the token and performs remote writes.
-  SYMPHONY_TRUSTED_PUBLISH_ONLY=1 "$0" "$workspace"
+  SYMPHONY_TRUSTED_PUBLISH_ONLY=1 SYMPHONY_VALIDATED_COMMIT="$validated_commit" \
+    "$0" "$workspace"
 
   require_token
   require_command gh
@@ -71,10 +83,14 @@ agent_command() {
 issue_number=$(issue_number_from_workspace "$workspace")
 branch=$(branch_for_issue "$issue_number")
 failure_status=failed
+trusted_push_dir=
 
 record_failure() {
   status=$?
   trap - EXIT HUP INT TERM
+  if [ -n "$trusted_push_dir" ]; then
+    rm -rf -- "$trusted_push_dir"
+  fi
   if [ "$status" -ne 0 ]; then
     python3 - "$workspace/.symphony-run-report.json" "$failure_status" <<'PY' || true
 import json
@@ -122,6 +138,9 @@ if [ "${SYMPHONY_TRUSTED_PUBLISH_ONLY:-0}" != 1 ]; then
     agent_command cargo clippy --all-targets --all-features -- -D warnings
     agent_command cargo test --all-features
   )
+  validated_commit=${SYMPHONY_VALIDATED_COMMIT:-$(trusted_git_read rev-parse HEAD)}
+  [ "$(trusted_git_read rev-parse HEAD)" = "$validated_commit" ] || \
+    die "workspace HEAD changed during validation"
   [ "${SYMPHONY_VALIDATE_ONLY:-0}" != 1 ] || exit 0
 fi
 
@@ -131,16 +150,34 @@ python3 "$control_root/scripts/symphony/gate.py" verify "$workspace"
 current_branch=$(trusted_git_read branch --show-current)
 [ "$current_branch" = "$branch" ] || die "workspace branch changed before publication"
 [ -z "$(trusted_git_read status --porcelain)" ] || die "workspace changed before publication"
-published_commit=$(trusted_git_read rev-parse HEAD)
+published_commit=${SYMPHONY_VALIDATED_COMMIT:-$(trusted_git_read rev-parse HEAD)}
+[ "$(trusted_git_read rev-parse HEAD)" = "$published_commit" ] || \
+  die "workspace HEAD changed after validation"
 
 failure_status=publish_failed
+trusted_push_dir=$(mktemp -d "${SYMPHONY_STATE_ROOT:?}/trusted-push.XXXXXX")
+chmod 0700 "$trusted_push_dir"
+env -u SYMPHONY_GITHUB_TOKEN -u GH_TOKEN -u GITHUB_TOKEN -u SSH_AUTH_SOCK \
+  GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+  git init --bare "$trusted_push_dir" >/dev/null
+env -u SYMPHONY_GITHUB_TOKEN -u GH_TOKEN -u GITHUB_TOKEN -u SSH_AUTH_SOCK \
+  GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+  git -C "$trusted_push_dir" -c protocol.allow=never -c protocol.file.allow=always \
+  fetch --no-tags "$workspace" "$published_commit" >/dev/null
+[ "$(env -u SYMPHONY_GITHUB_TOKEN -u GH_TOKEN -u GITHUB_TOKEN -u SSH_AUTH_SOCK \
+  GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+  git -C "$trusted_push_dir" rev-parse FETCH_HEAD)" = "$published_commit" ] || \
+  die "trusted staging did not reproduce the validated commit"
 GIT_ASKPASS="$control_root/scripts/symphony/git-askpass.sh" \
 GIT_TERMINAL_PROMPT=0 \
-GIT_CONFIG=/dev/null GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
 GH_TOKEN= GITHUB_TOKEN= SSH_AUTH_SOCK= \
-git -C "$workspace" -c safe.directory="$workspace" -c core.hooksPath=/dev/null \
-  -c credential.helper= push --no-verify "https://github.com/$repo_slug.git" \
+git -C "$trusted_push_dir" -c protocol.allow=never -c protocol.https.allow=always \
+  -c core.hooksPath=/dev/null -c credential.helper= \
+  push --no-verify "https://github.com/$repo_slug.git" \
   "$published_commit:refs/heads/$branch"
+rm -rf -- "$trusted_push_dir"
+trusted_push_dir=
 
 issue_title=$(GH_TOKEN="$SYMPHONY_GITHUB_TOKEN" \
   gh issue view "$issue_number" --repo "$repo_slug" --json title --jq .title)

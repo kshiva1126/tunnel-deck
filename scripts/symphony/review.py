@@ -14,6 +14,7 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
 
 from gate import API_TIMEOUT, REPO, Refused, api, listing
@@ -349,22 +350,40 @@ def git(workspace, *args):
 
 
 def push(workspace, number, commit, expected_remote):
-    """Push through the trusted non-interactive credential helper."""
+    """Stage in trusted metadata, then push with the credentialed parent."""
     control = Path(os.environ["SYMPHONY_CONTROL_ROOT"])
-    env = trusted_git_env(include_token=True)
-    env["GIT_ASKPASS"] = str(control / "scripts/symphony/git-askpass.sh")
-    env["GIT_TERMINAL_PROMPT"] = "0"
     try:
-        subprocess.run(["git", "-C", str(workspace),
-                        "-c", f"safe.directory={workspace}",
+        with tempfile.TemporaryDirectory(
+                prefix="trusted-push-", dir=os.environ["SYMPHONY_STATE_ROOT"]) as staging:
+            subprocess.run(["git", "init", "--bare", staging], env=trusted_git_env(),
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=30, check=True)
+            subprocess.run(["git", "-C", staging, "-c", "protocol.allow=never",
+                            "-c", "protocol.file.allow=always", "fetch", "--no-tags",
+                            str(workspace), commit], env=trusted_git_env(),
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=60, check=True)
+            staged = subprocess.run(["git", "-C", staging, "rev-parse", "FETCH_HEAD"],
+                                    env=trusted_git_env(), text=True,
+                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                    timeout=30, check=True).stdout.strip()
+            if staged != commit:
+                raise ReviewStopped("trusted staging did not reproduce remediation commit")
+            env = trusted_git_env(include_token=True)
+            env["GIT_ASKPASS"] = str(control / "scripts/symphony/git-askpass.sh")
+            env["GIT_TERMINAL_PROMPT"] = "0"
+            subprocess.run(["git", "-C", staging, "-c", "protocol.allow=never",
+                        "-c", "protocol.https.allow=always",
                         "-c", "core.hooksPath=/dev/null", "-c", "credential.helper=",
                         "push", "--no-verify",
                         f"--force-with-lease=refs/heads/symphony/issue-{number}:{expected_remote}",
                         f"https://github.com/{REPO}.git",
                         f"{commit}:refs/heads/symphony/issue-{number}"], env=env,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                       timeout=60, check=True)
-    except (OSError, subprocess.SubprocessError):
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=60, check=True)
+    except ReviewStopped:
+        raise
+    except (OSError, subprocess.SubprocessError, KeyError):
         raise ReviewStopped("trusted remediation push failed") from None
 
 

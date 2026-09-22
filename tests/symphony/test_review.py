@@ -74,10 +74,14 @@ class ValidationTests(unittest.TestCase):
             self.assertNotIn(key, child_env)
 
     def test_push_uses_trusted_noninteractive_askpass(self):
-        completed = __import__("subprocess").CompletedProcess([], 0)
+        def completed(command, **_kwargs):
+            output = "b" * 40 + "\n" if command[-2:] == ["rev-parse", "FETCH_HEAD"] else ""
+            return __import__("subprocess").CompletedProcess(command, 0, stdout=output)
+
         with patch.dict(os.environ, {"SYMPHONY_CONTROL_ROOT": str(ROOT),
+                                    "SYMPHONY_STATE_ROOT": str(ROOT),
                                     "SYMPHONY_GITHUB_TOKEN": "secret"}), \
-                patch("subprocess.run", return_value=completed) as run:
+                patch("subprocess.run", side_effect=completed) as run:
             review.push(ROOT, 28, "b" * 40, "a" * 40)
         command = run.call_args.args[0]
         self.assertEqual(command[0], "git")
