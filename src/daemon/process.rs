@@ -76,17 +76,27 @@ impl ManagedAttempt {
             return Ok(());
         };
         match wait_child(&mut guardian, STOP_GRACE + Duration::from_secs(2)) {
-            Ok(()) => Ok(()),
+            Ok(status) if status.success() => Ok(()),
+            Ok(status) => {
+                self.force_cleanup(&mut guardian);
+                Err(ProcessError::Protocol(format!(
+                    "guardian exited unsuccessfully: {status}"
+                )))
+            }
             Err(error) => {
-                // The group belongs to this still-live attempt; no persisted or
-                // externally supplied PID is used as signaling authority.
-                unsafe { libc::kill(-self.master_pid, libc::SIGKILL) };
-                let _ = guardian.kill();
-                let _ = guardian.wait();
-                let _ = fs::remove_dir_all(&self.attempt_dir);
+                self.force_cleanup(&mut guardian);
                 Err(error)
             }
         }
+    }
+
+    fn force_cleanup(&self, guardian: &mut Child) {
+        // The group belongs to this still-live attempt; no persisted or
+        // externally supplied PID is used as signaling authority.
+        unsafe { libc::kill(-self.master_pid, libc::SIGKILL) };
+        let _ = guardian.kill();
+        let _ = guardian.wait();
+        let _ = fs::remove_dir_all(&self.attempt_dir);
     }
 }
 
@@ -465,11 +475,11 @@ fn format_exit(status: ExitStatus, diagnostic: String) -> String {
         diagnostic
     }
 }
-fn wait_child(child: &mut Child, timeout: Duration) -> Result<(), ProcessError> {
+fn wait_child(child: &mut Child, timeout: Duration) -> Result<ExitStatus, ProcessError> {
     let deadline = Instant::now() + timeout;
     loop {
-        if child.try_wait()?.is_some() {
-            return Ok(());
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
         }
         if Instant::now() >= deadline {
             return Err(ProcessError::Protocol(
@@ -551,5 +561,48 @@ mod tests {
             bounded_read(vec![b'x'; MAX_STDERR_BYTES * 3].as_slice()).len(),
             MAX_STDERR_BYTES
         );
+    }
+
+    #[test]
+    fn abnormal_guardian_exit_forces_master_group_cleanup() {
+        let root = tempfile::tempdir().unwrap();
+        let attempt_dir = root.path().join("attempt");
+        fs::create_dir(&attempt_dir).unwrap();
+        let mut master_command = Command::new("sh");
+        master_command.args(["-c", "while :; do sleep 1; done"]);
+        unsafe {
+            master_command.pre_exec(|| {
+                if libc::setpgid(0, 0) == -1 {
+                    Err(io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            });
+        }
+        let mut master = master_command.spawn().unwrap();
+        let guardian = Command::new("sh").args(["-c", "exit 7"]).spawn().unwrap();
+        let mut attempt = ManagedAttempt {
+            lease: None,
+            guardian: Some(guardian),
+            master_pid: master.id() as i32,
+            attempt_dir: attempt_dir.clone(),
+            attempt_id: Uuid::new_v4(),
+        };
+
+        assert!(
+            matches!(attempt.cleanup(), Err(ProcessError::Protocol(message)) if message.contains("guardian exited unsuccessfully"))
+        );
+        assert!(!attempt_dir.exists());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if master.try_wait().unwrap().is_some() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "master survived guardian failure"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
     }
 }

@@ -341,7 +341,7 @@ as signaling authority.
 
 GH-5 local verification (2026-09-23): Linux x86_64, Rust 1.85.0;
 `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`,
-and `cargo test --all-features` pass (70 unit tests, 5 CLI tests, 5 process
+and `cargo test --all-features` pass (71 unit tests, 5 CLI tests, 5 process
 lifecycle tests, doc-tests). An isolated OpenSSH 10.5p1 probe using disposable
 keys and configuration also passes strict host-key verification, private-master
 isolation, Local/Remote/Dynamic forwarding with real traffic, conflicts,
