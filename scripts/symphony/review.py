@@ -355,7 +355,8 @@ def push(workspace, number, commit, expected_remote):
     env["GIT_ASKPASS"] = str(control / "scripts/symphony/git-askpass.sh")
     env["GIT_TERMINAL_PROMPT"] = "0"
     try:
-        subprocess.run(agent_prefix() + ["git", "-C", str(workspace),
+        subprocess.run(["git", "-C", str(workspace),
+                        "-c", f"safe.directory={workspace}",
                         "-c", "core.hooksPath=/dev/null", "-c", "credential.helper=",
                         "push", "--no-verify",
                         f"--force-with-lease=refs/heads/symphony/issue-{number}:{expected_remote}",

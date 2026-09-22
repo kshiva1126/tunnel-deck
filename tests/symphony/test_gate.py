@@ -30,7 +30,11 @@ root = pathlib.Path(os.environ["FAKE_ROOT"])
 with (root / "calls").open("a") as f:
     f.write(name + " " + " ".join(args) + "\n")
 config = json.loads((root / "fixture.json").read_text())
-if name == "gh":
+if name == "id":
+    print("0" if os.environ.get("FAKE_ROOT_MODE") == "1" else os.getuid())
+elif name == "chown":
+    pass
+elif name == "gh":
     if args[0] == "api":
         method = args[args.index("--method") + 1]
         endpoint = next(a for a in args if a == "user" or a.startswith("repos/"))
@@ -109,7 +113,11 @@ elif name == "git":
     elif command[:1] == ["diff"]: print("fixture change")
     elif command[:1] == ["status"] and config.get("dirty"): print("?? unfinished")
     elif command[:2] == ["rev-parse", "HEAD"]: print("a" * 40)
-    elif command[:1] not in (["status"], ["rev-parse"], ["push"]): sys.exit(4)
+    elif command[:1] == ["push"]:
+        if os.environ.get("FAKE_ROOT_MODE") == "1":
+            assert os.environ.get("SYMPHONY_TRUSTED_PUBLISH_ONLY") == "1"
+            assert os.environ.get("SYMPHONY_GITHUB_TOKEN")
+    elif command[:1] not in (["status"], ["rev-parse"]): sys.exit(4)
 elif name == "codex":
     assert args == ["app-server", "-c", 'model="gpt-5.6-sol"']
     assert all(k not in os.environ for k in ("SYMPHONY_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN", "SSH_AUTH_SOCK"))
@@ -280,7 +288,7 @@ class HookTests(unittest.TestCase):
         run_report.write_initial(self.workspace, 24, "GH-24-fixture")
         bin_dir = self.root / "bin"
         bin_dir.mkdir()
-        for name in ("gh", "git", "codex", "setpriv"):
+        for name in ("gh", "git", "codex", "setpriv", "id", "chown"):
             path = bin_dir / name
             path.write_text(FAKE)
             path.chmod(0o755)
@@ -384,6 +392,29 @@ class HookTests(unittest.TestCase):
         self.assertEqual(after.returncode, 0, after.stderr)
         self.assertIn("setpriv --reuid=", self.calls())
         self.assertIn("gh pr create", self.calls())
+
+    def test_docker_publication_splits_unprivileged_validation_from_trusted_push(self):
+        self.env.update(FAKE_ROOT_MODE="1", SYMPHONY_AGENT_UID="1234",
+                        SYMPHONY_AGENT_GID="1234")
+        before = self.hook("before")
+        self.assertEqual(before.returncode, 0, before.stderr)
+        report_path = run_report.report_path(self.workspace)
+        report = json.loads(report_path.read_text())
+        report["status"] = "completed"
+        report_path.write_text(json.dumps(report))
+
+        validate_env = dict(self.env, SYMPHONY_VALIDATE_ONLY="1")
+        validated = subprocess.run([str(SCRIPTS / "after_run.sh"), str(self.workspace)],
+                                   env=validate_env, text=True, capture_output=True, timeout=60)
+        self.assertEqual(validated.returncode, 0, validated.stderr)
+        self.assertNotIn("push --no-verify", self.calls())
+
+        publish_env = dict(self.env, SYMPHONY_TRUSTED_PUBLISH_ONLY="1")
+        published = subprocess.run([str(SCRIPTS / "after_run.sh"), str(self.workspace)],
+                                   env=publish_env, text=True, capture_output=True, timeout=60)
+        self.assertEqual(published.returncode, 0, published.stderr)
+        self.assertEqual(self.calls().count(
+            "push --no-verify https://github.com/kshiva1126/tunnel-deck.git"), 1)
 
     def test_open_dependencies_on_later_page(self):
         for count in (1, 2):
@@ -742,7 +773,7 @@ class HookTests(unittest.TestCase):
                     self.assertEqual(sum("--method GET " in line and
                                          ("/dependencies/" if kind == "dependencies" else "/pulls?") in line
                                          for line in self.calls().splitlines()), 3)
-                    self.assertNotIn("push --set-upstream", self.calls())
+                    self.assertNotIn("push --no-verify", self.calls())
                     self.assertNotIn("gh pr ", self.calls())
                     self.assertFalse((self.root / "state/GH-24.permit").exists())
                     self.assertTrue((self.root / "state/GH-24.stopped").exists())

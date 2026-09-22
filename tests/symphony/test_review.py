@@ -80,6 +80,8 @@ class ValidationTests(unittest.TestCase):
                 patch("subprocess.run", return_value=completed) as run:
             review.push(ROOT, 28, "b" * 40, "a" * 40)
         command = run.call_args.args[0]
+        self.assertEqual(command[0], "git")
+        self.assertNotIn("setpriv", command)
         self.assertEqual(command[-3:], [
             "--force-with-lease=refs/heads/symphony/issue-28:" + "a" * 40,
             f"https://github.com/{review.REPO}.git",
