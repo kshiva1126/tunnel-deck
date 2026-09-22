@@ -116,6 +116,7 @@ elif name == "git":
     elif command[:1] == ["diff"]: print("fixture change")
     elif command[:1] == ["status"] and config.get("dirty"): print("?? unfinished")
     elif command[:2] in (["rev-parse", "HEAD"], ["rev-parse", "FETCH_HEAD"]): print("a" * 40)
+    elif command[:3] == ["bundle", "create", "-"]: print("fixture bundle")
     elif command[:1] == ["fetch"]: pass
     elif command[:1] == ["push"]:
         if os.environ.get("FAKE_ROOT_MODE") == "1":

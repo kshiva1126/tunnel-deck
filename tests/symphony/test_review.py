@@ -98,6 +98,31 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(push_env["GIT_TERMINAL_PROMPT"], "0")
         self.assertEqual(push_env["GIT_ASKPASS"],
                          str(ROOT / "scripts/symphony/git-askpass.sh"))
+        commands = [call.args[0] for call in run.call_args_list]
+        bundle_command = next(command for command in commands if "bundle" in command)
+        self.assertEqual(bundle_command[-4:], ["bundle", "create", "-", "b" * 40])
+        fetch_command = next(command for command in commands if "fetch" in command)
+        self.assertTrue(fetch_command[-2].endswith("/source.bundle"))
+        self.assertNotEqual(fetch_command[-2], str(ROOT))
+
+    def test_root_push_bundles_workspace_as_agent(self):
+        def completed(command, **_kwargs):
+            output = "b" * 40 + "\n" if command[-2:] == ["rev-parse", "FETCH_HEAD"] else ""
+            return __import__("subprocess").CompletedProcess(command, 0, stdout=output)
+
+        with patch.object(review.os, "geteuid", return_value=0), \
+                patch.dict(os.environ, {"SYMPHONY_CONTROL_ROOT": str(ROOT),
+                                        "SYMPHONY_STATE_ROOT": str(ROOT),
+                                        "SYMPHONY_GITHUB_TOKEN": "secret",
+                                        "SYMPHONY_AGENT_UID": "1234",
+                                        "SYMPHONY_AGENT_GID": "5678"}), \
+                patch("subprocess.run", side_effect=completed) as run:
+            review.push(ROOT, 28, "b" * 40, "a" * 40)
+        commands = [call.args[0] for call in run.call_args_list]
+        bundle_command = next(command for command in commands if "bundle" in command)
+        self.assertEqual(bundle_command[:4], ["setpriv", "--reuid=1234",
+                         "--regid=5678", "--clear-groups"])
+        self.assertEqual(bundle_command[-4:], ["bundle", "create", "-", "b" * 40])
 
     def test_root_review_drops_to_the_configured_workspace_owner(self):
         with patch("os.geteuid", return_value=0), \

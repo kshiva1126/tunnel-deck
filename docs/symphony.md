@@ -102,10 +102,14 @@ In Docker, `after_run.sh` publishes and verifies the workspace as the unprivileg
 workspace owner, then returns to its root-owned trusted parent for `/state` and
 GitHub operations. Codex and all workspace commands are explicitly dropped back
 to the configured agent UID/GID; the remediation context is made readable only
-to that identity. Pushes use the fixed repository URL, disable repository hooks
-and credential helpers, and obtain the token only through the trusted askpass
-helper. This keeps agent-controlled Git configuration outside the credential
-boundary while preserving root-owned retry state.
+to that identity. Before each push, that identity serializes the validated
+commit to a bundle through a file descriptor opened by the trusted parent. The
+parent imports only that bundle into root-owned temporary Git metadata; it never
+opens the agent-controlled repository with root Git. Pushes then use the fixed
+repository URL, disable repository hooks and credential helpers, and obtain the
+token only through the trusted askpass helper. This keeps agent-controlled Git
+configuration outside the credential boundary while preserving root-owned
+retry state.
 
 The required check names default to `ubuntu-latest,macos-latest,CodeRabbit`
 (the current CI matrix job names) and may be changed

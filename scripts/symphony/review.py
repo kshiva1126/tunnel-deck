@@ -358,12 +358,19 @@ def push(workspace, number, commit, expected_remote):
     try:
         with tempfile.TemporaryDirectory(
                 prefix="trusted-push-", dir=os.environ["SYMPHONY_STATE_ROOT"]) as staging:
+            bundle = Path(staging) / "source.bundle"
+            with bundle.open("wb") as output:
+                subprocess.run(agent_prefix() + ["git", "-C", str(workspace), "bundle",
+                               "create", "-", commit], env=credential_free_env(),
+                               stdout=output, stderr=subprocess.DEVNULL,
+                               timeout=60, check=True)
+            bundle.chmod(0o600)
             subprocess.run(["git", "init", "--bare", staging], env=trusted_git_env(),
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                            timeout=30, check=True)
             subprocess.run(["git", "-C", staging, "-c", "protocol.allow=never",
                             "-c", "protocol.file.allow=always", "fetch", "--no-tags",
-                            str(workspace), commit], env=trusted_git_env(),
+                            str(bundle), commit], env=trusted_git_env(),
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                            timeout=60, check=True)
             staged = subprocess.run(["git", "-C", staging, "rev-parse", "FETCH_HEAD"],
