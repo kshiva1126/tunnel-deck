@@ -38,8 +38,20 @@ class ReleasePackagingTest(unittest.TestCase):
             with tarfile.open(archive, "r:gz") as contents:
                 names = contents.getnames()
                 self.assertEqual(sorted(names), names)
+                self.assertTrue(any(name.endswith("/LICENSE") for name in names))
+                self.assertTrue(any(name.endswith("/THIRD_PARTY_LICENSES.txt") for name in names))
                 self.assertTrue(any(name.endswith("release.json") for name in names))
                 self.assertEqual({1}, {member.mtime for member in contents.getmembers()})
+
+    def test_third_party_notices_match_locked_release_dependencies(self):
+        from scripts.licenses import generate
+
+        expected = Path("THIRD_PARTY_LICENSES.txt").read_text(encoding="utf-8")
+        self.assertEqual(expected, generate.render())
+        self.assertIn("unicode-ident", expected)
+        self.assertIn("Unicode-3.0", expected)
+        self.assertIn("foldhash", expected)
+        self.assertIn("Zlib", expected)
 
     def test_aggregate_requires_every_target_and_rechecks_checksums(self):
         with tempfile.TemporaryDirectory() as directory:

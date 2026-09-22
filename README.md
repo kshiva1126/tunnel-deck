@@ -72,7 +72,10 @@ build result, and packaged-artifact native-smoke status separately. A successful
 build is not a native execution claim. Native smoke tests of the packaged
 artifacts on every distribution target remain separate release acceptance work.
 Tag runs create a GitHub Release only after all four outputs and checksums have
-been validated.
+been validated. Every archive also includes TunnelDeck's `LICENSE` and the
+locked dependency notices in `THIRD_PARTY_LICENSES.txt`; the pre-publication
+evidence and remaining risks are recorded in the
+[release audit](docs/release-audit.md).
 
 ## Install and get started
 

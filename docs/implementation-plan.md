@@ -357,6 +357,14 @@ tree as `--help`. The guide uses the archive and checksum contract implemented
 by GH-48. Signing/notarization and artifact smoke tests remain owned by later
 release validation.
 
+Implementation status: GH-50 adds the pre-publication license, security, and
+resource audit. Release archives include generated notices for the locked
+four-target dependency union, and the audit separates automated results, code
+review, and pending native/human checks. No high/critical issue was found;
+same-user connection/thread and configured process-count caps remain documented
+hardening gaps. Native artifact smoke, macOS 13/Intel validation, signing, and
+notarization remain release-owner work.
+
 `clap_complete`, `clap_mangen`, and its `roff` dependency are used only to
 render these CLI materials. Their package metadata declares MIT OR Apache-2.0,
 and no third-party source or assets were copied.
