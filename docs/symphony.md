@@ -2,13 +2,13 @@
 
 This repository can run an opt-in local Symphony worker for GitHub Issues.
 Symphony watches open issues carrying the `agent-ready` label, creates an
-isolated workspace and branch, and starts Codex in that workspace. A host-side
+isolated workspace and branch, and starts Codex after trusted admission checks. A host-side
 hook publishes a pull request only after the agent has committed its work and
 all required Rust checks pass.
 
 ## One-time setup
 
-Install `symphony`, `codex`, and `gh`, then authenticate Codex and GitHub. The
+Install `symphony`, `codex`, `gh`, and Python 3.9+, then authenticate Codex and GitHub. The
 GitHub token needs repository access to `kshiva1126/tunnel-deck` with these
 fine-grained permissions:
 
@@ -84,3 +84,168 @@ push the prepared branch, open a pull request, and move the issue from
 Review the diff, CI, and acceptance criteria before merging. The generated pull
 request uses `Refs #N`, so merge does not automatically close an issue whose
 full acceptance criteria still need manual confirmation.
+
+## Dependency admission and replay protection (GH-24)
+
+Both launchers now require Python 3.9+ (included in the Docker image) and use
+`worker.py` to supervise Symphony. `WORKFLOW.md` calls trusted `gate.py` before
+and after a turn. The existing shell hooks still own workspace preparation,
+Rust validation, and publication; they are invoked only after admission.
+The TunnelDeck application, storage/IPC contracts, and SSH policy are unchanged.
+
+The gate reads the target issue, every page of its native
+[`dependencies/blocked_by` REST relationship](https://docs.github.com/en/rest/issues/issue-dependencies#list-dependencies-an-issue-is-blocked-by),
+and every page of PR history for `symphony/issue-N`. It uses `gh api
+--paginate --slurp`, validates the JSON structure and dependency states, and
+limits each API command, including pagination, to 30 seconds. Issue body text
+such as `Depends on` is not an admission source. A merged dependency PR does
+not resolve a dependency while its issue remains open.
+
+Admission requires an open issue with `agent-ready`, without `blocked` or
+`human-review`, all dependencies closed, and no PR history on the prepared
+branch. An open, closed, or merged PR on that branch requires human review;
+automatic reruns do not update previously published PRs. This deliberately
+trades automatic PR follow-up for protection against replaying merged work.
+API errors, inaccessible dependencies, missing permissions, timeouts, unknown
+states, and invalid/incomplete responses all refuse admission. Diagnostics
+contain fixed reasons and validated dependency repository/issue identifiers,
+never issue titles/bodies, API response text, CLI stderr, or token values.
+
+On refusal, the trusted gate persists `GH-N.stopped` **before** attempting any
+label update. It removes `agent-ready`, then adds `blocked`, without posting
+comments. A later attempt sees the local stop record and performs no GitHub
+calls, Codex launch, or publish-hook invocation. If adding `blocked` fails,
+removing `agent-ready` still leaves the issue out of the queue. If removing
+`agent-ready` fails, the gate also writes `halt`; the supervisor checks it once
+per second and terminates Symphony's process group (SIGTERM, then SIGKILL after
+5 seconds). Restart is refused until an operator clears the halt. This stops
+the scheduler even when GitHub cannot accept the transition. Always use the
+launchers: invoking the Symphony binary directly bypasses this shutdown guard.
+
+Symphony v0.0.3 invokes `after_run` even when `before_run` fails. The gate
+therefore creates a one-use `GH-N.permit` only after the before hook succeeds,
+and consumes it before invoking the after hook. Without it, the after gate
+returns without calling the publish shell script. The after gate rechecks
+admission; the publish shell script checks again after Rust validation,
+immediately before push. A successful publication leaves a local stop record
+as well. These checks are snapshots: use one worker per state directory and
+repository, and do not run a competing publisher or merge the same branch
+concurrently with publication. GitHub does not offer an atomic transaction
+covering dependency inspection, push, and PR creation.
+
+State is outside the agent workspace, with directory mode 0700 and files 0600:
+
+| Mode | Default trusted state directory |
+| --- | --- |
+| Host | `~/.local/state/symphony/tunnel-deck/gates` |
+| Docker | `~/.local/state/symphony/tunnel-deck/docker-gates`, mounted at `/state` |
+
+`SYMPHONY_STATE_ROOT` overrides the host path in either launcher. Use a dedicated
+absolute directory, not the workspace or control checkout. Docker makes that
+directory root-owned; the Codex UID cannot read or change admission records.
+Hooks load code from the read-only `/control` mount and query GitHub before
+handing off to workspace hooks. `codex.sh` removes `SYMPHONY_GITHUB_TOKEN`,
+`GH_TOKEN`, `GITHUB_TOKEN`, and `SSH_AUTH_SOCK` in both modes; Docker also drops
+the UID/GID with `setpriv`. Direct host mode retains its existing same-user
+trust limitation: environment removal is not OS isolation from that user's
+credential store or other processes. No GitHub credential is passed to Codex
+by this workflow.
+
+## Recover and requeue
+
+There is no automatic resume on dependency closure; removing and re-adding a
+label alone does not clear the durable stop. For a stopped issue:
+
+1. Stop the worker. Inspect `GH-N.stopped` and, if present, `halt` in the trusted
+   state directory. Docker records require a host administrator to read them.
+2. Resolve every native blocking issue, or repair GitHub access/timeouts. Check
+   the target issue and all PR states for `symphony/issue-N`. For already merged
+   or published work, review acceptance criteria and close the issue manually
+   when appropriate; track additional work in a new issue. Do not delete PR
+   history or reuse a merged branch to bypass admission.
+3. Inspect the existing workspace and preserve any unfinished commits. For a
+   legitimate retry with no PR history, remove `blocked` and restore
+   `agent-ready`. Use the read-only `verify` command below to confirm eligibility.
+4. While the worker remains stopped, remove only that issue's `GH-N.stopped`
+   and `GH-N.permit` from the trusted directory. If a global halt occurred,
+   repair access and verify removal of `agent-ready` from the affected issue(s)
+   before clearing `halt`; requeue only the issue(s) intentionally retried.
+   Use administrator privileges for Docker's root-owned records. Never clear
+   state while a worker is running.
+5. Restart the same launcher with the same state directory. Admission queries
+   GitHub again; unresolved dependencies or another error stop the issue again.
+
+State survives workspace deletion, worker restarts, and Docker container
+replacement. Keep it when upgrading the trusted control checkout. After
+upgrading from an older workflow, existing branch PR history and issue labels
+are checked even when no local stop record exists.
+
+## Verification and safe native-dependency E2E
+
+Run the offline harness on Linux and macOS:
+
+```sh
+python3 -m unittest discover -s tests/symphony -v
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-features
+```
+
+The harness substitutes GitHub, Git, and Codex commands, uses temporary
+workspaces, and exercises the actual gate and shell hooks. Success paths run
+the Rust publish checks on a tiny local fixture crate. Cases cover multi-page
+responses, open/closed dependencies, API and schema failures, actual subprocess
+timeout, replay/merge rejection, pre-push rechecking, one-use admission, token
+removal, failed label transitions, durable retry suppression, manual recovery,
+and supervisor shutdown. `setpriv` is simulated: those tests verify dispatch
+parity, not native Docker UID isolation. CI runs this harness on both OSes.
+
+For a safe check against **real GitHub dependencies**, an owner can use
+throwaway issues in `kshiva1126/tunnel-deck` while all workers are stopped:
+
+1. Create target issue T and blocker issues A/B. Give T `agent-ready`, with no
+   `blocked`/`human-review` or PR history. In GitHub's Relationships UI, mark T
+   as **blocked by** A/B (not merely a body reference). Keep the workers stopped
+   throughout so these test issues cannot be dispatched.
+2. Set `SYMPHONY_GITHUB_TOKEN` using a read-only token with Issues and Pull
+   requests read access. Run the following, replacing `123` with T's number:
+
+   ```sh
+   python3 scripts/symphony/gate.py verify /tmp/GH-123
+   ```
+
+   `verify` performs reads only: no workspace creation, labels, comments, Codex,
+   Git pushes, or publication. Exit 1 means refused; exit 0 means eligible.
+   Refusals print a sanitized reason, including open dependency identifiers.
+3. Repeat with no relationships (expect 0), A/B open (1), just A closed (1),
+   and both closed (0). Confirm a merged PR for A while A stays open still
+   refuses T. Remove read permissions or unset the token and expect 1. Run
+   `verify` for a previously published/merged issue and expect 1.
+4. Repeat the same read-only command in the built Docker image with the same
+   token and trusted checkout:
+
+   ```sh
+   docker run --rm --read-only --env SYMPHONY_GITHUB_TOKEN \
+     --mount "type=bind,src=$PWD,dst=/control,readonly" \
+     tunnel-deck-symphony:local \
+     python3 /control/scripts/symphony/gate.py verify /tmp/GH-123
+   ```
+
+   The outcomes and open dependency identifiers must agree. This command
+   deliberately runs only the verifier; it never starts Symphony or Codex.
+5. Remove `agent-ready` from the throwaway issues and close them before
+   restarting a worker. Record issue URLs, native relationship states,
+   exit statuses, OS, and tool versions, without recording credentials.
+
+This read-only E2E validates the real dependency API separately from the
+harness's launch/publish side-effect assertions. Native GitHub E2E, Docker
+runtime isolation, and remote Linux/macOS CI are not claimed by local fake
+results; remote CI remains a human-review condition after publication.
+
+GH-24 local verification (2026-09-22): Linux x86_64, Python 3.11.2, Rust 1.85.0.
+All 18 harness tests, `cargo fmt --check`, Clippy with `-D warnings`, and
+`cargo test --all-features` passed (47 unit tests, 3 CLI tests, doc-tests).
+The first Rust test run could not find `rustdoc`; rerunning with
+`/usr/local/cargo/bin` on PATH passed. Shell syntax and `git diff --check` also
+passed. No live GitHub writes, native dependency E2E, Docker runtime test, or
+remote Linux/macOS CI were run in this agent workspace.

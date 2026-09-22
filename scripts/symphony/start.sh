@@ -18,6 +18,11 @@ command -v gh >/dev/null 2>&1 || {
   exit 1
 }
 
+command -v python3 >/dev/null 2>&1 || {
+  printf 'python3 is required for trusted admission checks\n' >&2
+  exit 1
+}
+
 if [ -z "${SYMPHONY_GITHUB_TOKEN:-}" ]; then
   SYMPHONY_GITHUB_TOKEN=$(gh auth token 2>/dev/null) || {
     printf 'Set SYMPHONY_GITHUB_TOKEN or log in with gh auth login\n' >&2
@@ -31,10 +36,11 @@ export SYMPHONY_WORKSPACE_ROOT="${SYMPHONY_WORKSPACE_ROOT:-$HOME/.local/share/sy
 
 logs_root=${SYMPHONY_LOGS_ROOT:-$HOME/.local/state/symphony/tunnel-deck/logs}
 port=${SYMPHONY_PORT:-4000}
+export SYMPHONY_STATE_ROOT="${SYMPHONY_STATE_ROOT:-$HOME/.local/state/symphony/tunnel-deck/gates}"
 
 mkdir -p "$SYMPHONY_WORKSPACE_ROOT" "$logs_root"
 
-exec symphony "$control_root/WORKFLOW.md" \
+exec python3 "$script_dir/worker.py" symphony "$control_root/WORKFLOW.md" \
   --logs-root "$logs_root" \
   --port "$port" \
   --i-understand-that-this-will-be-running-without-the-usual-guardrails

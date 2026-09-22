@@ -27,6 +27,8 @@ jobs:
       - uses: actions/checkout@v7
       - name: Install pinned Rust toolchain
         run: rustup show active-toolchain
+      - name: Test Symphony admission hooks
+        run: python3 -m unittest discover -s tests/symphony -v
       - name: Check formatting
         run: cargo fmt --check
       - name: Run Clippy
