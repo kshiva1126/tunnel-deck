@@ -345,6 +345,7 @@ impl DaemonManager {
                 Ok(attempt) => Some(attempt),
                 Err(error) => {
                     let diagnostic = process::classify_diagnostic(&error.to_string());
+                    let mut failure_recorded = false;
                     let mut reconnect_scheduled = false;
                     let mut state = self.state.lock().map_err(|_| {
                         (
@@ -354,6 +355,7 @@ impl DaemonManager {
                     })?;
                     if matches!(state.running.get(&id), Some(Attempt::Starting(current)) if *current == attempt_id)
                     {
+                        failure_recorded = true;
                         let reconnect_enabled = rule.reconnect() && diagnostic.retryable;
                         let info = state.diagnostics.entry(id).or_default();
                         info.active_since = None;
@@ -380,6 +382,11 @@ impl DaemonManager {
                         }
                     }
                     drop(state);
+                    if !failure_recorded {
+                        return Ok(
+                            json!({"rule_id": id, "start_requested": false, "changed": true}),
+                        );
+                    }
                     self.log_event(
                         LogLevel::Error,
                         &format!(
@@ -548,6 +555,12 @@ impl DaemonManager {
             }
         }
         for id in reconnecting {
+            self.log_event(
+                LogLevel::Error,
+                &format!(
+                    "event=rule_failed rule_id={id} diagnostic_kind=unknown diagnostic=the SSH connection ended unexpectedly"
+                ),
+            );
             self.log_event(
                 LogLevel::Info,
                 &format!(

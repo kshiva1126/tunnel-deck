@@ -118,6 +118,69 @@ fn stop_during_start_discards_the_late_forwarding_success() {
 }
 
 #[test]
+fn stop_during_failed_start_does_not_record_a_spurious_failure() {
+    use serde_json::json;
+    use std::{sync::Arc, thread};
+    use tunnel_deck::{
+        config::ConfigStore,
+        daemon::{lifecycle::RequestHandler, manager::DaemonManager},
+        ipc::{Operation, Request, Response},
+    };
+
+    let root = private_tempdir();
+    let config = root.path().join("config");
+    fs::create_dir(&config).unwrap();
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o700)).unwrap();
+    let managed_rule = rule();
+    ConfigStore::open(&config)
+        .unwrap()
+        .save(std::slice::from_ref(&managed_rule))
+        .unwrap();
+    let (ssh, _) = fake_ssh_with_check(root.path(), "exit 1", "sleep 1; exit 1");
+    let manager = Arc::new(
+        DaemonManager::open_managed(
+            &config,
+            root.path().to_owned(),
+            PathBuf::from(env!("CARGO_BIN_EXE_tdeck")),
+            ssh,
+            lock(root.path()),
+            test_log(root.path()),
+        )
+        .unwrap(),
+    );
+    let id = managed_rule.id().as_uuid();
+    let request = move |operation| Request::new(operation, json!({"rule_id": id}));
+    let starter = {
+        let manager = Arc::clone(&manager);
+        thread::spawn(move || manager.handle(&request(Operation::ForwardStart)))
+    };
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !fs::read_dir(root.path()).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("attempt-")
+    }) {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    assert!(matches!(
+        manager.handle(&request(Operation::ForwardStop)),
+        Response::Success(value) if value.result["changed"] == true
+    ));
+    assert!(matches!(
+        starter.join().unwrap(),
+        Response::Success(value) if value.result["start_requested"] == false
+    ));
+    let logged = fs::read_to_string(root.path().join("tunnel-deck.log")).unwrap();
+    assert!(logged.contains("event=rule_stopped"));
+    assert!(!logged.contains("event=rule_failed"));
+    assert!(!logged.contains("diagnostic="));
+}
+
+#[test]
 fn status_remains_available_while_stop_waits_for_guardian_cleanup() {
     use serde_json::json;
     use std::{sync::Arc, thread};
