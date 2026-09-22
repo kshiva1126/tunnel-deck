@@ -138,7 +138,14 @@ def main():
         permit.unlink()
     else:
         permit.unlink(missing_ok=True)
-    if stopped.exists() or (root / "halt").exists():
+    if stopped.exists():
+        # A stale tracker snapshot or manual relabel can dispatch a stopped
+        # issue again. Failing the hook alone lets Symphony retry forever.
+        # Stop the supervisor without repeating GitHub writes or comments.
+        (root / "halt").write_text(
+            f"GH-{number} was dispatched while stopped; operator recovery required.\n")
+        raise Refused(f"GH-{number} is stopped; worker shutdown requested")
+    if (root / "halt").exists():
         raise Refused(f"GH-{number} is stopped; operator recovery required")
     try:
         check(number)

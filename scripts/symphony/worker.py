@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stop the worker if a failed label transition cannot remove a queued issue."""
+"""Stop the worker when admission requests operator recovery."""
 
 import os
 import signal
@@ -36,7 +36,7 @@ def main():
     try:
         while True:
             if (root / "halt").exists():
-                print("symphony worker: halted after failed admission label update", file=sys.stderr)
+                print("symphony worker: halted; admission requires operator recovery", file=sys.stderr)
                 return 1
             try:
                 return child.wait(timeout=1)

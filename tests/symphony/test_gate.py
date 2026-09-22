@@ -142,7 +142,14 @@ class HookTests(unittest.TestCase):
         self.attempt()
         self.assertEqual(calls, self.calls(), "latched retries must perform no external calls")
         self.assertTrue((self.root / "state/GH-24.stopped").exists())
+        self.assertTrue((self.root / "state/halt").exists(),
+                        "redispatch must stop the scheduler, not just fail another hook")
         return before
+
+    def clear_stop(self):
+        # Operator recovery happens only while the worker is stopped.
+        (self.root / "state/GH-24.stopped").unlink()
+        (self.root / "state/halt").unlink(missing_ok=True)
 
     def test_no_dependencies_runs_and_publishes(self):
         before, after = self.attempt()
@@ -175,7 +182,7 @@ class HookTests(unittest.TestCase):
                 before = self.assert_blocked()
                 for n in range(count):
                     self.assertIn(f"kshiva1126/tunnel-deck#{30 + n}", before.stderr)
-                (self.root / "state/GH-24.stopped").unlink()
+                self.clear_stop()
 
     def test_api_error_and_invalid_json_fail_closed(self):
         for kind in ("issue", "dependencies", "prs"):
@@ -184,7 +191,7 @@ class HookTests(unittest.TestCase):
                     self.config[failure] = kind
                     self.save()
                     self.assert_blocked()
-                    (self.root / "state/GH-24.stopped").unlink()
+                    self.clear_stop()
                     del self.config[failure]
 
     def test_invalid_dependency_schema_fails_closed(self):
@@ -193,7 +200,7 @@ class HookTests(unittest.TestCase):
                 self.config["dependencies"] = [[bad]]
                 self.save()
                 self.assert_blocked()
-                (self.root / "state/GH-24.stopped").unlink()
+                self.clear_stop()
 
     def test_closed_review_blocked_and_unqueued_issues(self):
         for state, labels in (("closed", ["agent-ready"]), ("open", ["agent-ready", "human-review"]),
@@ -202,7 +209,7 @@ class HookTests(unittest.TestCase):
                 self.config["issue"][0].update(state=state, labels=[{"name": name} for name in labels])
                 self.save()
                 self.assert_blocked()
-                (self.root / "state/GH-24.stopped").unlink()
+                self.clear_stop()
 
     def test_any_pr_history_prevents_reprocessing(self):
         for state, merged in (("open", None), ("closed", None), ("closed", "2026-09-22T00:00:00Z")):
@@ -210,7 +217,7 @@ class HookTests(unittest.TestCase):
                 self.config["prs"] = [[], [{"number": 99, "state": state, "merged_at": merged}]]
                 self.save()
                 self.assert_blocked()
-                (self.root / "state/GH-24.stopped").unlink()
+                self.clear_stop()
 
     def test_merge_between_before_and_after_prevents_publish(self):
         self.assertEqual(self.hook("before").returncode, 0)
@@ -241,7 +248,7 @@ class HookTests(unittest.TestCase):
         self.config["dependencies"] = [[dependency(22, "closed")]]
         self.save()  # Operator restores agent-ready and removes blocked.
         self.assertNotEqual(self.hook("before").returncode, 0)
-        (self.root / "state/GH-24.stopped").unlink()
+        self.clear_stop()
         self.assertEqual(self.hook("before").returncode, 0)
 
     def test_pre_push_verify_rejects_new_dependency(self):
@@ -279,10 +286,29 @@ class HookTests(unittest.TestCase):
     def test_failed_blocked_label_does_not_restore_queue_or_halt(self):
         self.config.update(fail="POST:labels", dependencies=[[dependency(22, "open")]])
         self.save()
-        self.assert_blocked()
+        before, after = self.attempt()
+        self.assertNotEqual(before.returncode, 0)
+        self.assertEqual(after.returncode, 0)
         issue = json.loads((self.root / "fixture.json").read_text())["issue"][0]
         self.assertNotIn({"name": "agent-ready"}, issue["labels"])
         self.assertFalse((self.root / "state/halt").exists())
+        self.assert_blocked()
+
+    def test_relabel_stopped_issue_halts_worker_without_external_calls(self):
+        self.config["dependencies"] = [[dependency(22, "open")]]
+        self.save()
+        self.assertNotEqual(self.hook("before").returncode, 0)
+        self.assertFalse((self.root / "state/halt").exists())
+        # Relabeling without clearing the durable stop must not create a loop.
+        self.config["dependencies"] = [[dependency(22, "closed")]]
+        self.save()
+        calls = self.calls()
+        self.assert_blocked()
+        self.assertEqual(calls, self.calls())
+        result = subprocess.run([sys.executable, str(SCRIPTS / "worker.py"), "codex", "app-server"],
+                                env=self.env, capture_output=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.root / "codex-ran").exists())
 
     def test_unsafe_state_directory_refuses_without_external_effects(self):
         state = self.root / "state"

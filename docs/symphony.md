@@ -114,7 +114,11 @@ never issue titles/bodies, API response text, CLI stderr, or token values.
 On refusal, the trusted gate persists `GH-N.stopped` **before** attempting any
 label update. It removes `agent-ready`, then adds `blocked`, without posting
 comments. A later attempt sees the local stop record and performs no GitHub
-calls, Codex launch, or publish-hook invocation. If adding `blocked` fails,
+calls, Codex launch, or publish-hook invocation. That redispatch also writes
+`halt` to stop the worker: a hook failure by itself does not stop Symphony's
+retry scheduler. This covers stale tracker snapshots and manually restoring
+`agent-ready` without clearing the stop record, including after publication.
+If adding `blocked` fails,
 removing `agent-ready` still leaves the issue out of the queue. If removing
 `agent-ready` fails, the gate also writes `halt`; the supervisor checks it once
 per second and terminates Symphony's process group (SIGTERM, then SIGKILL after
@@ -168,8 +172,9 @@ label alone does not clear the durable stop. For a stopped issue:
    `agent-ready`. Use the read-only `verify` command below to confirm eligibility.
 4. While the worker remains stopped, remove only that issue's `GH-N.stopped`
    and `GH-N.permit` from the trusted directory. If a global halt occurred,
-   repair access and verify removal of `agent-ready` from the affected issue(s)
-   before clearing `halt`; requeue only the issue(s) intentionally retried.
+   repair access when needed and inspect its reason. Remove `agent-ready` from
+   stopped issues that should remain paused before clearing `halt`; restore it
+   only for eligible issues whose stop records are intentionally cleared.
    Use administrator privileges for Docker's root-owned records. Never clear
    state while a worker is running.
 5. Restart the same launcher with the same state directory. Admission queries
@@ -196,7 +201,8 @@ workspaces, and exercises the actual gate and shell hooks. Success paths run
 the Rust publish checks on a tiny local fixture crate. Cases cover multi-page
 responses, open/closed dependencies, API and schema failures, actual subprocess
 timeout, replay/merge rejection, pre-push rechecking, one-use admission, token
-removal, failed label transitions, durable retry suppression, manual recovery,
+removal, failed label transitions, durable retry suppression, shutdown on
+redispatch of a stopped issue, manual recovery,
 and supervisor shutdown. `setpriv` is simulated: those tests verify dispatch
 parity, not native Docker UID isolation. CI runs this harness on both OSes.
 
@@ -243,9 +249,11 @@ runtime isolation, and remote Linux/macOS CI are not claimed by local fake
 results; remote CI remains a human-review condition after publication.
 
 GH-24 local verification (2026-09-22): Linux x86_64, Python 3.11.2, Rust 1.85.0.
-All 18 harness tests, `cargo fmt --check`, Clippy with `-D warnings`, and
+All 19 harness tests, `cargo fmt --check`, Clippy with `-D warnings`, and
 `cargo test --all-features` passed (47 unit tests, 3 CLI tests, doc-tests).
 The first Rust test run could not find `rustdoc`; rerunning with
 `/usr/local/cargo/bin` on PATH passed. Shell syntax and `git diff --check` also
-passed. No live GitHub writes, native dependency E2E, Docker runtime test, or
+passed. Follow-up verification also covers worker shutdown when a stopped
+issue is dispatched again; all three Rust checks passed again with the full
+toolchain PATH. No live GitHub writes, native dependency E2E, Docker runtime test, or
 remote Linux/macOS CI were run in this agent workspace.
