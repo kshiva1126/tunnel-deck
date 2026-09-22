@@ -102,6 +102,12 @@ Keep domain types free of Ratatui, Clap, Tokio process, and serialization
 details where reasonable. This allows state-machine and validation tests to run
 without terminals, sockets, or real SSH connections.
 
+The effective-forward import preview is an application-layer read operation.
+It reuses host discovery's bounded `ssh -G` execution, parses forwarding lines
+into preview-only typed values, and compares immutable desired/running
+snapshots. It does not call configuration storage, daemon IPC, or process
+management; selection and persistence remain future UI/application work.
+
 ## IPC
 
 Use a per-user Unix socket under the shared platform path resolver's runtime

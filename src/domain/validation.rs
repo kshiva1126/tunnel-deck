@@ -75,7 +75,7 @@ pub fn validate_rule_set(rules: &[Rule]) -> Result<(), Vec<ValidationError>> {
     }
 }
 
-fn bind_addresses_overlap(left: &BindAddress, right: &BindAddress) -> bool {
+pub(crate) fn bind_addresses_overlap(left: &BindAddress, right: &BindAddress) -> bool {
     let left = BindingClass::from(left);
     let right = BindingClass::from(right);
     match (&left, &right) {
