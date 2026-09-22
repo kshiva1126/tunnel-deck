@@ -66,11 +66,17 @@ private service and are ultimately bounded by per-user/system limits. They are
 not release-blocking high/critical findings, but must remain visible rather than
 being described as solved.
 
-## Native and human checks not performed here
+## Native and human checks
 
-- No packaged release archive was executed on Linux x86_64/aarch64 or macOS
-  Intel/Apple Silicon. The release manifest must continue to say
-  `native_smoke_test.status = not_run` until those checks occur.
+- After publication of the audit PR, the four CI archives from commit
+  `10a789c` in [run 35792546673][audit-artifacts] were downloaded and all four
+  entries in `SHA256SUMS` were rechecked. Every archive contained `tdeck`,
+  `LICENSE`, `THIRD_PARTY_LICENSES.txt`, and `release.json`. The Linux x86_64
+  archive was extracted on Linux x86_64 and `tdeck --version` returned 0.1.0.
+  This is useful PR-artifact evidence, but it is not a tag/release-candidate
+  artifact and therefore does not change `native_smoke_test.status = not_run`.
+- No packaged release-candidate archive was executed on Linux aarch64 or macOS
+  Intel/Apple Silicon. Those checks remain pending.
 - This Linux run does not validate macOS 13, Intel macOS, Apple signing,
   notarization, Gatekeeper behavior, native descriptor/flock semantics, or
   terminal/browser behavior. Follow `docs/macos-validation.md`.
@@ -84,3 +90,5 @@ Remote Linux/macOS CI remains post-publication automated evidence. Release-
 artifact smoke and the explicitly listed native/human checks remain separate
 acceptance conditions. Their absence before publication does not change the
 local audit result and must not be reported as a pass.
+
+[audit-artifacts]: https://github.com/kshiva1126/tunnel-deck/actions/runs/35792546673
