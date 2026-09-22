@@ -91,6 +91,10 @@ Both launchers now require Python 3.9+ (included in the Docker image) and use
 `worker.py` to supervise Symphony. `WORKFLOW.md` calls trusted `gate.py` before
 and after a turn. The existing shell hooks still own workspace preparation,
 Rust validation, and publication; they are invoked only after admission.
+Missing or non-executable trusted shell hooks also persist a stop record and
+remove the issue from the queue. Repair the trusted installation before using
+the same manual recovery procedure; a hook launch error must not become an
+unbounded retry. Diagnostics omit OS exception text and installation paths.
 The TunnelDeck application, storage/IPC contracts, and SSH policy are unchanged.
 
 The gate reads the target issue, every page of its native
@@ -260,5 +264,9 @@ issue is dispatched again; all three Rust checks passed again with the full
 toolchain PATH. Additional tests cover invalid issue numbers and page shapes,
 and verify that the E2E verifier makes only GET requests and writes no local
 admission state on either success or refusal.
+Hook-launch failure follow-up: all 23 harness tests and the three required
+Rust checks passed on the same Linux environment. Missing and non-executable
+before/after hooks now have regression coverage for durable stop records,
+consumed permits, sanitized diagnostics, and retries without external effects.
 No live GitHub writes, native dependency E2E, Docker runtime test, or
 remote Linux/macOS CI were run in this agent workspace.

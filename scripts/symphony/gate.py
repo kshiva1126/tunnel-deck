@@ -151,7 +151,12 @@ def main():
     try:
         check(number)
         hook = Path(os.environ["SYMPHONY_CONTROL_ROOT"]) / "scripts/symphony" / f"{mode}_run.sh"
-        result = subprocess.run([str(hook), workspace], check=False)
+        try:
+            result = subprocess.run([str(hook), workspace], check=False)
+        except OSError:
+            # A missing/non-executable trusted hook must latch just like a
+            # nonzero exit, rather than leaving Symphony free to retry it.
+            raise Refused(f"{mode}_run hook could not start; inspect trusted installation") from None
         if result.returncode:
             raise Refused(f"{mode}_run hook failed; inspect hook diagnostics")
         if mode == "before":

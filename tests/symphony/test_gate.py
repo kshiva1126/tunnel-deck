@@ -264,6 +264,43 @@ class HookTests(unittest.TestCase):
         self.assertEqual(self.hook("after").returncode, 0)
         self.assertEqual(self.calls(), "")
 
+    def test_hook_launch_failure_latches_and_suppresses_retries(self):
+        control = self.root / "synthetic-secret-do-not-log"
+        hooks = control / "scripts/symphony"
+        hooks.mkdir(parents=True)
+        for mode in ("before", "after"):
+            for failure in ("missing", "non-executable"):
+                with self.subTest(mode=mode, failure=failure):
+                    self.env["SYMPHONY_CONTROL_ROOT"] = str(ROOT)
+                    if mode == "after":
+                        self.assertEqual(self.hook("before").returncode, 0)
+                    self.env["SYMPHONY_CONTROL_ROOT"] = str(control)
+                    hook = hooks / f"{mode}_run.sh"
+                    if failure == "non-executable":
+                        hook.write_text("#!/bin/sh\nexit 0\n")
+                        hook.chmod(0o600)
+                    result = self.hook(mode)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(f"{mode}_run hook could not start", result.stderr)
+                    stopped = self.root / "state/GH-24.stopped"
+                    self.assertTrue(stopped.exists())
+                    self.assertNotIn("synthetic-secret", stopped.read_text())
+                    self.assertFalse((self.root / "state/GH-24.permit").exists())
+                    calls = self.calls()
+                    for _ in range(2):
+                        before, after = self.attempt()
+                        self.assertNotEqual(before.returncode, 0)
+                        self.assertEqual(after.returncode, 0)
+                    self.assertEqual(calls, self.calls())
+                    self.assertTrue((self.root / "state/halt").exists())
+                    self.assertFalse((self.root / "codex-ran").exists())
+                    self.assertNotIn("push", calls)
+                    self.assertNotIn("gh pr ", calls)
+                    self.clear_stop()
+                    hook.unlink(missing_ok=True)
+                    self.save()  # Restore queue labels for the next scenario.
+                    (self.root / "calls").unlink()
+
     def test_label_failure_requests_global_halt_once(self):
         self.config.update(fail="labels", dependencies=[[dependency(22, "open")]])
         self.save()
