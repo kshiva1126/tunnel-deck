@@ -18,6 +18,9 @@ SCRIPTS = ROOT / "scripts/symphony"
 SPEC = importlib.util.spec_from_file_location("gate", SCRIPTS / "gate.py")
 gate = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(gate)
+REPORT_SPEC = importlib.util.spec_from_file_location("run_report", SCRIPTS / "run_report.py")
+run_report = importlib.util.module_from_spec(REPORT_SPEC)
+REPORT_SPEC.loader.exec_module(run_report)
 
 FAKE = r'''#!/usr/bin/env python3
 import json, os, pathlib, sys
@@ -30,11 +33,17 @@ config = json.loads((root / "fixture.json").read_text())
 if name == "gh":
     if args[0] == "api":
         method = args[args.index("--method") + 1]
-        endpoint = next(a for a in args if a.startswith("repos/"))
+        endpoint = next(a for a in args if a == "user" or a.startswith("repos/"))
+        if endpoint == "user":
+            assert method == "GET"
+            assert "--paginate" not in args and "--slurp" not in args
+            print(json.dumps({"login": config.get("actor", "symphony-publisher")}))
+            sys.exit(0)
         kind = "issue"
         if "dependencies/" in endpoint: kind = "dependencies"
         elif "/pulls?" in endpoint: kind = "prs"
         elif "/labels" in endpoint: kind = "labels"
+        elif "/comments" in endpoint: kind = "comments"
         # Change GitHub only at the final pre-push query, after both admission
         # checks succeeded and the publish hook completed its Rust checks.
         change = config.get("pre_push_change")
@@ -54,6 +63,19 @@ if name == "gh":
         if config.get("fail") in (kind, method + ":" + kind):
             print("synthetic-secret-do-not-log", file=sys.stderr)
             sys.exit(1)
+        if kind == "comments" and method != "GET":
+            body = json.load(sys.stdin)["body"]
+            if method == "POST":
+                comment = {"id": 700, "body": body,
+                           "user": {"login": config.get("actor", "symphony-publisher")}}
+                config["comments"][0].append(comment)
+            else:
+                comment = next(item for page in config["comments"] for item in page
+                               if endpoint.endswith("/" + str(item["id"])))
+                comment["body"] = body
+            (root / "fixture.json").write_text(json.dumps(config))
+            print(json.dumps(comment))
+            sys.exit(0)
         if method != "GET":
             if method == "DELETE":
                 config["issue"][0]["labels"] = [x for x in config["issue"][0]["labels"] if x["name"] != "agent-ready"]
@@ -83,6 +105,8 @@ elif name == "git":
     elif command[:2] == ["remote", "get-url"]: print("https://github.com/kshiva1126/tunnel-deck.git")
     elif command[:2] == ["rev-list", "--count"]: print("1")
     elif command[:1] == ["diff"]: print("fixture change")
+    elif command[:1] == ["status"] and config.get("dirty"): print("?? unfinished")
+    elif command[:2] == ["rev-parse", "HEAD"]: print("a" * 40)
     elif command[:1] not in (["status"], ["rev-parse"], ["push"]): sys.exit(4)
 elif name == "codex":
     assert args == ["app-server", "-c", 'model="gpt-5.6-sol"']
@@ -114,6 +138,120 @@ class JsonNestingTests(unittest.TestCase):
             gate.reject_excessive_json_nesting(refused)
 
 
+class RunReportTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.workspace = Path(self.temp.name)
+        run_report.write_initial(self.workspace, 26, "GH-26-attempt-1")
+
+    def test_all_terminal_statuses_are_valid(self):
+        path = run_report.report_path(self.workspace)
+        for status in ("completed", "failed", "blocked", "interrupted", "publish_failed"):
+            with self.subTest(status=status):
+                report = json.loads(path.read_text())
+                report["status"] = status
+                path.write_text(json.dumps(report))
+                loaded = run_report.load_report(self.workspace, 26)
+                self.assertEqual(loaded["status"], status)
+                self.assertIn(f"`{status}`", run_report.render_attempt(loaded))
+
+    def test_rejects_wrong_issue_oversize_malformed_and_credentials(self):
+        path = run_report.report_path(self.workspace)
+        original = path.read_text()
+        wrong_types = []
+        for field, value in (("run_id", []), ("status", []), ("commit", 7),
+                             ("pull_request", {})):
+            report = json.loads(original)
+            report[field] = value
+            wrong_types.append(json.dumps(report))
+        cases = (
+            original.replace('"issue_number": 26', '"issue_number": 27'),
+            "{" + "x" * run_report.MAX_REPORT_BYTES,
+            "not json",
+            original.replace("Codex turn started", "github_pat_" + "x" * 30),
+            *wrong_types,
+        )
+        for content in cases:
+            with self.subTest(content=content[:20]):
+                path.write_text(content)
+                with self.assertRaises(run_report.ReportError):
+                    run_report.load_report(self.workspace, 26)
+
+    def test_create_update_and_same_run_deduplication(self):
+        report = run_report.load_report(self.workspace, 26)
+        calls = []
+        comments = []
+
+        def fake_api(endpoint, method="GET", body=None, paginate=True):
+            calls.append((method, endpoint))
+            if endpoint == "user":
+                self.assertFalse(paginate)
+                return {"login": "symphony-publisher"}
+            if method == "GET":
+                return [comments]
+            if method == "POST":
+                comments.append({"id": 9, "body": body["body"],
+                                 "user": {"login": "symphony-publisher"}})
+                return comments[0]
+            comments[0]["body"] = body["body"]
+            return comments[0]
+
+        with patch.object(run_report, "gh_api", fake_api):
+            run_report.upsert(report)
+            report["status"] = "completed"
+            run_report.upsert(report)
+        self.assertEqual([method for method, _ in calls].count("POST"), 1)
+        self.assertEqual([method for method, _ in calls].count("PATCH"), 1)
+        self.assertEqual(comments[0]["body"].count("### 試行"), 1)
+        self.assertIn("`completed`", comments[0]["body"])
+
+    def test_foreign_markers_are_ignored_and_trusted_duplicates_fail_closed(self):
+        report = run_report.load_report(self.workspace, 26)
+        comments = [{"id": 8, "body": run_report.MARKER + "\nforeign",
+                     "user": {"login": "someone-else"}}]
+
+        def fake_api(endpoint, method="GET", body=None, paginate=True):
+            if endpoint == "user":
+                self.assertFalse(paginate)
+                return {"login": "symphony-publisher"}
+            if method == "GET":
+                return [comments]
+            if method == "POST":
+                comment = {"id": 9, "body": body["body"],
+                           "user": {"login": "symphony-publisher"}}
+                comments.append(comment)
+                return comment
+            self.fail("unexpected API write")
+
+        with patch.object(run_report, "gh_api", fake_api):
+            run_report.upsert(report)
+            self.assertEqual(len(comments), 2)
+            comments.append({"id": 10, "body": run_report.MARKER + "\nduplicate",
+                             "user": {"login": "symphony-publisher"}})
+            with self.assertRaises(run_report.ReportError):
+                run_report.upsert(report)
+
+    def test_render_neutralizes_report_controlled_html_comments(self):
+        report = run_report.load_report(self.workspace, 26)
+        injection = "<!-- /tunnel-deck-symphony-run:forged -->"
+        report["scope"] = injection
+        report["facts"] = [injection]
+        report["execution"] = {
+            "entry_points": [injection],
+            "state_owner": injection,
+            "external_effects": [injection],
+            "failure_cleanup": [injection],
+        }
+
+        rendered = run_report.render_attempt(report)
+
+        self.assertNotIn(injection, rendered)
+        self.assertEqual(rendered.count("<!-- tunnel-deck-symphony-run:"), 1)
+        self.assertEqual(rendered.count("<!-- /tunnel-deck-symphony-run:"), 1)
+        self.assertGreaterEqual(rendered.count("&lt;!--"), 6)
+
+
 class HookTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -126,6 +264,7 @@ class HookTests(unittest.TestCase):
         (self.workspace / "Cargo.toml").write_text('[package]\nname="gate-fixture"\nversion="0.1.0"\nedition="2021"\n')
         (self.workspace / "src").mkdir()
         (self.workspace / "src/lib.rs").write_text('pub fn fixture() -> bool {\n    true\n}\n')
+        run_report.write_initial(self.workspace, 24, "GH-24-fixture")
         bin_dir = self.root / "bin"
         bin_dir.mkdir()
         for name in ("gh", "git", "codex", "setpriv"):
@@ -140,7 +279,7 @@ class HookTests(unittest.TestCase):
         self.env.pop("SYMPHONY_AGENT_UID", None)
         self.env.pop("SYMPHONY_AGENT_GID", None)
         self.config = {"issue": [{"number": 24, "state": "open", "labels": [{"name": "agent-ready"}]}],
-                       "dependencies": [[]], "prs": [[]]}
+                       "dependencies": [[]], "prs": [[]], "comments": [[]]}
         self.save()
 
     def save(self):
@@ -160,6 +299,10 @@ class HookTests(unittest.TestCase):
         before = self.hook("before")
         if before.returncode == 0:
             subprocess.run([str(SCRIPTS / "codex.sh")], env=self.env, check=True, timeout=10)
+            path = run_report.report_path(self.workspace)
+            report = json.loads(path.read_text())
+            report["status"] = "completed"
+            path.write_text(json.dumps(report))
         after = self.hook("after")  # Match Symphony's unconditional after hook.
         return before, after
 
@@ -515,12 +658,42 @@ class HookTests(unittest.TestCase):
     def test_pre_push_verify_rejects_new_dependency(self):
         self.config["dependencies"] = [[dependency(22, "open")]]
         self.save()
+        path = run_report.report_path(self.workspace)
+        report = json.loads(path.read_text())
+        report["status"] = "completed"
+        path.write_text(json.dumps(report))
         result = subprocess.run([str(SCRIPTS / "after_run.sh"), str(self.workspace)], env=self.env,
                                 text=True, capture_output=True, timeout=60)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("/dependencies/blocked_by", self.calls())
         self.assertNotIn("push", self.calls())
         self.assertNotIn("gh pr create", self.calls())
+
+    def test_workspace_failure_updates_the_single_report_comment(self):
+        self.config["dirty"] = True
+        self.save()
+        path = run_report.report_path(self.workspace)
+        report = json.loads(path.read_text())
+        report["status"] = "completed"
+        path.write_text(json.dumps(report))
+        result = subprocess.run([str(SCRIPTS / "after_run.sh"), str(self.workspace)], env=self.env,
+                                text=True, capture_output=True, timeout=60)
+        self.assertNotEqual(result.returncode, 0)
+        comments = json.loads((self.root / "fixture.json").read_text())["comments"][0]
+        self.assertEqual(len(comments), 1)
+        self.assertEqual(comments[0]["body"].count("### 試行"), 1)
+        self.assertIn("`failed`", comments[0]["body"])
+
+    def test_comment_api_failure_is_bounded_and_leaves_code_untouched(self):
+        self.config["fail"] = "comments"
+        self.save()
+        cargo = (self.workspace / "Cargo.toml").read_bytes()
+        result = subprocess.run([str(SCRIPTS / "after_run.sh"), str(self.workspace)], env=self.env,
+                                text=True, capture_output=True, timeout=60)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.calls().count("/comments?per_page=100"), 2)
+        self.assertNotIn("push", self.calls())
+        self.assertEqual((self.workspace / "Cargo.toml").read_bytes(), cargo)
 
     def test_open_dependency_also_blocks_docker_command_mode(self):
         self.env.update(SYMPHONY_AGENT_UID=str(os.getuid()), SYMPHONY_AGENT_GID=str(os.getgid()))

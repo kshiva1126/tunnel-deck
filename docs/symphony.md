@@ -85,6 +85,53 @@ Review the diff, CI, and acceptance criteria before merging. The generated pull
 request uses `Refs #N`, so merge does not automatically close an issue whose
 full acceptance criteria still need manual confirmation.
 
+## Decision report on the source Issue (GH-26)
+
+Each admitted turn starts with a private, untracked
+`.symphony-run-report.json` in its workspace. Codex updates this structured
+file with a review-oriented summary: scope, discovered facts, selected
+decisions and reasons, rejected alternatives, execution ownership and cleanup,
+verification, remaining risks, and final outcome. It must not contain private
+chain-of-thought, credentials, or unnecessary environment values. The trusted
+hook, not Codex, owns GitHub access and fills in the final commit and pull
+request links.
+
+The hook creates or updates one source-Issue comment beginning with
+`<!-- tunnel-deck-symphony-run-report -->`. A retry replaces its own marked
+attempt section and a later run appends one history section; it never rewrites
+the Issue body. The generated PR links back to this comment so human reviewers
+and CodeRabbit can recover the implementation context. The comment is only a
+summary and link index: accepted product and architecture decisions remain
+authoritative in the existing documents under `docs/`, while code and test
+results remain the evidence for implemented behavior.
+
+The report validator requires the exact schema, matching positive Issue
+number, bounded report/comment sizes, known outcome, and valid repository-local
+PR URL and commit ID. It rejects malformed input and credential-like strings
+before any comment write. Comment lookup is paginated and marker matches are
+restricted to comments owned by the authenticated trusted publisher; foreign
+markers are ignored. Zero trusted matches creates the comment, one updates it,
+and multiple trusted matches fail closed for operator inspection. Writes are
+restricted to comments on the admitted source Issue.
+
+An initial `interrupted` report exists before Codex starts, so an unconditional
+after hook can publish useful context even if the turn ends early. Test or
+workspace validation failures become `failed`; failures after validation and
+during remote publication become `publish_failed`. A Codex-reported `blocked`
+outcome is retained. Comment failures are logged, make the trusted hook fail,
+and enter the existing durable stop flow; the hook makes only one bounded
+retry from its failure cleanup and never rewrites code or the Issue body.
+Because both host and Docker launchers use the same trusted hooks, their report
+behavior is identical. The four sensitive variables continue to be removed
+before the Codex child starts.
+
+If comment publication fails, inspect the sanitized hook diagnostic and the
+trusted `GH-N.stopped` record with the worker stopped. Repair permission,
+timeout, duplicate-marker, or report-validation problems before following the
+normal recovery procedure below. A timeout has an unknown remote outcome, so
+inspect the Issue before retrying; the marker and run ID make a retry
+idempotent.
+
 ## Codex model selection (GH-25)
 
 `WORKFLOW.md`'s `codex.command` invokes the trusted
@@ -444,3 +491,17 @@ recursion behavior; boundary coverage also verifies that brackets inside JSON
 strings do not count as nesting. Native GitHub E2E and Docker runtime isolation
 were not rerun. The prior remote Linux/macOS jobs exposed this portability gap;
 replacement jobs are required before merge.
+
+GH-26 local verification (2026-09-22): on Linux, all 40 offline harness tests
+passed in host and simulated Docker command modes. Coverage includes initial
+comment creation, update and same-run deduplication, every terminal report
+status, malformed/wrong-Issue/oversized/credential-like report rejection,
+workspace and publication failures, bounded comment API failure, PR backlink,
+and continued removal of GitHub credentials from Codex. Shell syntax, Python
+compilation, and diff whitespace checks passed. With `/usr/local/cargo/bin` on
+`PATH`, `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D
+warnings`, and `cargo test --all-features` passed (47 unit tests, 3 CLI tests,
+and doc-tests). The first test invocation reached all Rust tests but could not
+start rustdoc until that documented toolchain PATH was restored. No live
+GitHub writes, native Docker isolation, or native macOS run was performed;
+remote Linux/macOS CI remains a post-publication review condition.
