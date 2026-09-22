@@ -64,13 +64,15 @@ class ValidationTests(unittest.TestCase):
         completed = __import__("subprocess").CompletedProcess([], 0)
         with tempfile.TemporaryDirectory() as directory, \
                 patch.dict(os.environ, {"SYMPHONY_GITHUB_TOKEN": "secret",
-                                        "GH_TOKEN": "secret", "SSH_AUTH_SOCK": "/agent"}), \
+                                        "GH_TOKEN": "secret", "SSH_AUTH_SOCK": "/agent",
+                                        "GIT_DIR": "/agent/repository"}), \
                 patch("subprocess.run", return_value=completed) as run:
             review.remediation(Path(directory), {"kind": "untrusted_diagnostics"})
         command = run.call_args.args[0]
         child_env = run.call_args.kwargs["env"]
         self.assertEqual(command[:4], ["codex", "exec", "-c", 'model=gpt-5.6-sol'])
-        for key in ("SYMPHONY_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN", "SSH_AUTH_SOCK"):
+        for key in ("SYMPHONY_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN", "SSH_AUTH_SOCK",
+                    "GIT_DIR"):
             self.assertNotIn(key, child_env)
 
     def test_push_uses_trusted_noninteractive_askpass(self):

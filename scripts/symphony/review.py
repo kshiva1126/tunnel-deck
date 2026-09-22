@@ -64,7 +64,10 @@ def agent_prefix():
 def credential_free_env():
     """Build the environment for all agent-controlled workspace commands."""
     env = os.environ.copy()
-    for key in ("SYMPHONY_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN", "SSH_AUTH_SOCK"):
+    for key in (
+            "SYMPHONY_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN", "SSH_AUTH_SOCK",
+            "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_PREFIX"):
         env.pop(key, None)
     return env
 

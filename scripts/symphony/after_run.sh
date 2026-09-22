@@ -168,11 +168,12 @@ env -u SYMPHONY_GITHUB_TOKEN -u GH_TOKEN -u GITHUB_TOKEN -u SSH_AUTH_SOCK \
   GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
   git -C "$trusted_push_dir" rev-parse FETCH_HEAD)" = "$published_commit" ] || \
   die "trusted staging did not reproduce the validated commit"
-GIT_ASKPASS="$control_root/scripts/symphony/git-askpass.sh" \
-GIT_TERMINAL_PROMPT=0 \
-GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
-GH_TOKEN= GITHUB_TOKEN= SSH_AUTH_SOCK= \
-git -C "$trusted_push_dir" -c protocol.allow=never -c protocol.https.allow=always \
+env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_INDEX_FILE \
+  -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_PREFIX \
+  GIT_ASKPASS="$control_root/scripts/symphony/git-askpass.sh" \
+  GIT_TERMINAL_PROMPT=0 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+  GH_TOKEN= GITHUB_TOKEN= SSH_AUTH_SOCK= \
+  git -C "$trusted_push_dir" -c protocol.allow=never -c protocol.https.allow=always \
   -c core.hooksPath=/dev/null -c credential.helper= \
   push --no-verify "https://github.com/$repo_slug.git" \
   "$published_commit:refs/heads/$branch"
