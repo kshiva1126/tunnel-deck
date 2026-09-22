@@ -74,6 +74,20 @@ artifacts on every distribution target remain separate release acceptance work.
 Tag runs create a GitHub Release only after all four outputs and checksums have
 been validated.
 
+## Install and get started
+
+Download the GitHub Release asset matching your Linux/macOS CPU, verify its
+published SHA-256 checksum, install the extracted `tdeck` executable on
+`PATH`, and follow the SSH preparation and first Local-forward walkthrough in
+the [installation guide](docs/installation.md). Archives use the name
+`tunnel-deck-<version>-<target>.tar.gz`; verify the selected archive against
+the published `SHA256SUMS` before extraction.
+
+The same guide covers safe updates, the current unsigned/unnotarized macOS
+Gatekeeper limitation, port conflicts, configuration and log locations, shell
+completion, the generated man page, and uninstalling. TunnelDeck never
+requires disabling Gatekeeper globally.
+
 ## Documents
 
 Track work and implementation order in the
@@ -92,6 +106,7 @@ ordinary successful work; documented exceptional cases stop for human review.
 - [Accepted design decisions](docs/design-decisions.md)
 - [OpenSSH experiment results and reproduction](docs/openssh-probe.md)
 - [macOS automated and human validation](docs/macos-validation.md)
+- [Installation, update, CLI extras, and removal](docs/installation.md)
 
 ## License
 

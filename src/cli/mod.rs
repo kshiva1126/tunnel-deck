@@ -1,7 +1,8 @@
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 
 use std::{
     env,
+    io::Write,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -56,12 +57,23 @@ enum Command {
         #[command(subcommand)]
         command: SettingsCommand,
     },
+    /// Generate shell completion to standard output
+    Completion(CompletionArgs),
+    /// Generate the tdeck(1) manual page to standard output
+    Manpage,
     /// Internal daemon commands
     #[command(hide = true)]
     Daemon {
         #[command(subcommand)]
         command: DaemonCommand,
     },
+}
+
+#[derive(Debug, Args)]
+struct CompletionArgs {
+    /// Shell whose completion script should be generated
+    #[arg(value_enum)]
+    shell: clap_complete::Shell,
 }
 
 #[derive(Debug, Subcommand)]
@@ -241,6 +253,21 @@ impl Cli {
                 }
                 SettingsCommand::Set(args) => update_settings(args, json_output),
             },
+            Some(Command::Completion(args)) => {
+                let mut command = Self::command();
+                let mut output = Vec::new();
+                clap_complete::generate(args.shell, &mut command, "tdeck", &mut output);
+                emit_generated("completion", output, json_output)
+            }
+            Some(Command::Manpage) => {
+                let mut output = Vec::new();
+                clap_mangen::Man::new(Self::command())
+                    .render(&mut output)
+                    .map_err(|error| {
+                        AppError::Configuration(format!("could not generate manual page: {error}"))
+                    })?;
+                emit_generated("manpage", output, json_output)
+            }
             Some(Command::Daemon { command }) => match command {
                 DaemonCommand::Run => run_daemon(),
                 DaemonCommand::Guardian(args) => {
@@ -249,6 +276,25 @@ impl Cli {
                 }
             },
         }
+    }
+}
+
+fn emit_generated(kind: &str, output: Vec<u8>, json_output: bool) -> Result<(), AppError> {
+    let mut stdout = std::io::stdout().lock();
+    if json_output {
+        let content = String::from_utf8(output).map_err(|error| {
+            AppError::Configuration(format!("generated {kind} is not UTF-8: {error}"))
+        })?;
+        serde_json::to_writer(
+            &mut stdout,
+            &serde_json::json!({"kind": kind, "content": content}),
+        )
+        .map_err(|error| AppError::Configuration(error.to_string()))?;
+        writeln!(stdout).map_err(|error| AppError::Configuration(error.to_string()))
+    } else {
+        stdout
+            .write_all(&output)
+            .map_err(|error| AppError::Configuration(error.to_string()))
     }
 }
 

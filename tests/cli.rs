@@ -14,6 +14,56 @@ fn help_describes_available_hosts_and_tunnel_commands() {
     assert!(stdout.contains("host"));
     assert!(stdout.contains("forward"));
     assert!(stdout.contains("status"));
+    assert!(stdout.contains("completion"));
+    assert!(stdout.contains("manpage"));
+}
+
+#[test]
+fn help_completion_and_manpage_cover_the_same_primary_commands() {
+    let help = tdeck().arg("--help").output().expect("generate help");
+    let completion = tdeck()
+        .args(["completion", "bash"])
+        .output()
+        .expect("generate Bash completion");
+    let manpage = tdeck()
+        .arg("manpage")
+        .output()
+        .expect("generate manual page");
+
+    assert!(help.status.success());
+    assert!(completion.status.success());
+    assert!(manpage.status.success());
+    for command in ["host", "forward", "status", "settings"] {
+        assert!(
+            String::from_utf8_lossy(&help.stdout).contains(command),
+            "help omits {command}"
+        );
+        assert!(
+            String::from_utf8_lossy(&completion.stdout).contains(command),
+            "completion omits {command}"
+        );
+        assert!(
+            String::from_utf8_lossy(&manpage.stdout).contains(command),
+            "man page omits {command}"
+        );
+    }
+}
+
+#[test]
+fn generated_artifacts_honor_json_output() {
+    for (arguments, kind) in [
+        (["--json", "completion", "bash"].as_slice(), "completion"),
+        (["--json", "manpage"].as_slice(), "manpage"),
+    ] {
+        let output = tdeck()
+            .args(arguments)
+            .output()
+            .expect("generate JSON artifact");
+        assert!(output.status.success());
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["kind"], kind);
+        assert!(!value["content"].as_str().unwrap().is_empty());
+    }
 }
 
 #[test]

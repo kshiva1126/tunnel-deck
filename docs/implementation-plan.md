@@ -351,6 +351,16 @@ from packaged-artifact native smoke, which remains unverified here. macOS
 13/Intel native acceptance, four-target distribution smoke, signing, and
 notarization remain separate work, so this does not complete Milestone 5.
 
+Implementation status: GH-49 adds a focused installation/update/removal guide
+and generates shell completion and `tdeck(1)` content from the same Clap command
+tree as `--help`. The guide uses the archive and checksum contract implemented
+by GH-48. Signing/notarization and artifact smoke tests remain owned by later
+release validation.
+
+`clap_complete`, `clap_mangen`, and its `roff` dependency are used only to
+render these CLI materials. Their package metadata declares MIT OR Apache-2.0,
+and no third-party source or assets were copied.
+
 Tasks:
 
 - Produce Linux `x86_64`/`aarch64` and macOS Intel/Apple Silicon artifacts and
