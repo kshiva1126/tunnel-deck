@@ -33,7 +33,28 @@ Create these repository labels before the first run:
 - `human-review`: pull request created and awaiting review
 - `blocked`: owner input or an unresolved dependency is required
 
-## Run
+## Run in Docker (recommended)
+
+Docker limits the worker to the checked-out repository, dedicated workspace and
+log directories, and temporary credential mounts. The container drops Linux
+capabilities, uses a read-only root filesystem, and exposes the dashboard only
+on loopback. It does not receive the Docker socket.
+
+```sh
+./scripts/symphony/start-docker.sh
+```
+
+If the current login session predates addition to the `docker` group, the
+script uses `sg docker` for this run. Log out and back in once to make ordinary
+`docker` commands work without that compatibility step.
+
+The first run builds a local image with pinned Symphony, Codex, GitHub CLI, and
+Rust versions. It mounts the host Codex login read-only, copies it into a
+temporary in-container home, and removes the temporary GitHub token file when
+the worker exits. Supplying a repository-scoped `SYMPHONY_GITHUB_TOKEN` remains
+the least-privilege option.
+
+## Run directly on the host
 
 Add `agent-ready` only to a bounded, dependency-ready issue. Then run:
 

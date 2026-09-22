@@ -23,6 +23,11 @@ current_branch=$(git -C "$workspace" branch --show-current)
 commit_count=$(git -C "$workspace" rev-list --count "origin/$base_branch..HEAD")
 [ "$commit_count" -gt 0 ] || die "agent created no commit; nothing was published"
 
+if git -C "$workspace" diff --no-ext-diff "origin/$base_branch...HEAD" | \
+  grep -Eiq '(github_pat_|gh[opsu]_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|"(access|refresh|id)_token"[[:space:]]*:)'; then
+  die "possible credential found in committed diff; nothing was published"
+fi
+
 (
   cd "$workspace"
   cargo fmt --check
