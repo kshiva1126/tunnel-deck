@@ -167,11 +167,14 @@ fn status_remains_available_while_stop_waits_for_guardian_cleanup() {
 }
 
 fn rule() -> Rule {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
     Rule::local(
         RuleId::new(),
         "web",
         "configured-alias",
-        39123,
+        port,
         "127.0.0.1",
         3000,
     )
@@ -264,7 +267,8 @@ fn private_master_is_forwarded_then_forced_down_and_cleaned() {
     assert!(lines[1].contains("-O check"));
     assert!(lines[2].contains("-O forward"));
     assert!(lines[2].contains("ClearAllForwardings=no"));
-    assert!(lines[2].contains("-L 127.0.0.1:39123:127.0.0.1:3000"));
+    assert!(lines[2].contains("-L 127.0.0.1:"));
+    assert!(lines[2].contains(":127.0.0.1:3000"));
     let descendant_pid: i32 = fs::read_to_string(&descendant)
         .unwrap()
         .trim()

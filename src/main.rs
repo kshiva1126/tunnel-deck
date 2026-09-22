@@ -6,7 +6,11 @@ fn main() -> ExitCode {
     match tunnel_deck::run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("tdeck: {error}");
+            if matches!(error, tunnel_deck::error::AppError::JsonDaemon { .. }) {
+                eprintln!("{error}");
+            } else {
+                eprintln!("tdeck: {error}");
+            }
             ExitCode::from(ExitStatus::from(&error) as u8)
         }
     }

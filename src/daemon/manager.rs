@@ -104,7 +104,7 @@ impl DaemonManager {
                 Ok(json!({"rule_id": id}))
             }
             Operation::ForwardRemove => {
-                let id = rule_id(&request.payload)?;
+                let id = rule_id(&request.payload, &state)?;
                 if state.running.contains_key(&id) {
                     return Err((
                         ErrorCode::Conflict,
@@ -125,7 +125,7 @@ impl DaemonManager {
                 state.rules = next;
                 self.events
                     .publish("configuration_changed", json!({"rule_id": id}));
-                Ok(json!({"removed": true}))
+                Ok(json!({"rule_id": id, "removed": true}))
             }
             Operation::ForwardStart => {
                 unreachable!("start is dispatched without holding the state lock")
@@ -152,7 +152,22 @@ impl DaemonManager {
                     .filter(|value| matches!(value, Attempt::Active(_)))
                     .count();
                 let starting = state.running.len() - active;
-                Ok(json!({"rules": state.rules.len(), "active": active, "starting": starting}))
+                let states: Vec<_> = state
+                    .rules
+                    .iter()
+                    .map(|rule| {
+                        let id = rule.id().as_uuid();
+                        let status = match state.running.get(&id) {
+                            Some(Attempt::Starting(_)) => "starting",
+                            Some(Attempt::Active(_)) => "active",
+                            None => "stopped",
+                        };
+                        json!({"rule_id": id, "name": rule.name().as_str(), "state": status})
+                    })
+                    .collect();
+                Ok(
+                    json!({"rules": state.rules.len(), "active": active, "starting": starting, "forwards": states}),
+                )
             }
             Operation::Subscribe => Ok(json!({"subscribed": true})),
             _ => Err((
@@ -163,7 +178,6 @@ impl DaemonManager {
     }
 
     fn start(&self, request: &Request) -> Result<Value, (ErrorCode, String)> {
-        let id = rule_id(&request.payload)?;
         let attempt_id = Uuid::new_v4();
         let rule = {
             let mut state = self.state.lock().map_err(|_| {
@@ -172,6 +186,7 @@ impl DaemonManager {
                     "daemon state is unavailable".to_owned(),
                 )
             })?;
+            let id = rule_id(&request.payload, &state)?;
             let rule = state
                 .rules
                 .iter()
@@ -179,13 +194,15 @@ impl DaemonManager {
                 .cloned()
                 .ok_or((ErrorCode::NotFound, "rule was not found".to_owned()))?;
             if state.running.contains_key(&id) {
-                return Ok(json!({"start_requested": true, "changed": false}));
+                return Ok(json!({"rule_id": id, "start_requested": true, "changed": false}));
             }
+            check_local_port(&rule)?;
             // The attempt ID is a cancellable Starting marker. No process call is made
             // while the daemon state lock is held, so stop can remove it.
             state.running.insert(id, Attempt::Starting(attempt_id));
-            rule
+            (id, rule)
         };
+        let (id, rule) = rule;
         let attempt = if let Some(settings) = &self.process {
             match process::start_attempt(
                 &settings.executable,
@@ -224,7 +241,7 @@ impl DaemonManager {
             if let Some(attempt) = attempt {
                 attempt.stop().map_err(internal)?;
             }
-            return Ok(json!({"start_requested": false, "changed": true}));
+            return Ok(json!({"rule_id": id, "start_requested": false, "changed": true}));
         }
         state.running.insert(
             id,
@@ -235,11 +252,10 @@ impl DaemonManager {
         );
         drop(state);
         self.events.publish("rule_started", json!({"rule_id": id}));
-        Ok(json!({"start_requested": true, "changed": true}))
+        Ok(json!({"rule_id": id, "start_requested": true, "changed": true}))
     }
 
     fn stop(&self, request: &Request) -> Result<Value, (ErrorCode, String)> {
-        let id = rule_id(&request.payload)?;
         let attempt = {
             let mut state = self.state.lock().map_err(|_| {
                 (
@@ -247,11 +263,13 @@ impl DaemonManager {
                     "daemon state is unavailable".to_owned(),
                 )
             })?;
+            let id = rule_id(&request.payload, &state)?;
             if !state.rules.iter().any(|rule| rule.id().as_uuid() == id) {
                 return Err((ErrorCode::NotFound, "rule was not found".to_owned()));
             }
-            state.running.remove(&id)
+            (id, state.running.remove(&id))
         };
+        let (id, attempt) = attempt;
         let changed = attempt.is_some();
         if let Some(Attempt::Active(attempt)) = attempt {
             attempt
@@ -261,7 +279,7 @@ impl DaemonManager {
         if changed {
             self.events.publish("rule_stopped", json!({"rule_id": id}));
         }
-        Ok(json!({"start_requested": false, "changed": changed}))
+        Ok(json!({"rule_id": id, "start_requested": false, "changed": changed}))
     }
 }
 
@@ -288,15 +306,65 @@ fn internal(error: impl std::fmt::Display) -> (ErrorCode, String) {
 fn invalid(error: impl std::fmt::Display) -> (ErrorCode, String) {
     (ErrorCode::InvalidRequest, error.to_string())
 }
-fn rule_id(value: &Value) -> Result<Uuid, (ErrorCode, String)> {
+
+fn check_local_port(rule: &Rule) -> Result<(), (ErrorCode, String)> {
+    let Some((address, port)) = rule.local_listener() else {
+        return Ok(());
+    };
+    let address = if address.as_str() == "*" {
+        "0.0.0.0"
+    } else {
+        address.as_str()
+    };
+    match std::net::TcpListener::bind((address, port.get())) {
+        Ok(listener) => {
+            drop(listener);
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => Err((
+            ErrorCode::Conflict,
+            format!("local listener {address}:{} is already in use", port.get()),
+        )),
+        Err(error) => Err((
+            ErrorCode::Unavailable,
+            format!("local listener cannot be checked: {error}"),
+        )),
+    }
+}
+fn rule_id(value: &Value, state: &State) -> Result<Uuid, (ErrorCode, String)> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Selector {
+        Id { rule_id: Uuid },
+        Name { rule_name: String },
+    }
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Id {
         rule_id: Uuid,
     }
-    serde_json::from_value::<Id>(value.clone())
-        .map(|value| value.rule_id)
-        .map_err(invalid)
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Name {
+        rule_name: String,
+    }
+    let selector = serde_json::from_value::<Id>(value.clone())
+        .map(|v| Selector::Id { rule_id: v.rule_id })
+        .or_else(|_| {
+            serde_json::from_value::<Name>(value.clone()).map(|v| Selector::Name {
+                rule_name: v.rule_name,
+            })
+        })
+        .map_err(invalid)?;
+    match selector {
+        Selector::Id { rule_id } => Ok(rule_id),
+        Selector::Name { rule_name } => state
+            .rules
+            .iter()
+            .find(|rule| rule.name().as_str() == rule_name)
+            .map(|rule| rule.id().as_uuid())
+            .ok_or((ErrorCode::NotFound, "rule was not found".to_owned())),
+    }
 }
 
 #[cfg(test)]
@@ -398,5 +466,58 @@ mod tests {
         drop(manager);
         let reopened = DaemonManager::open(root.path()).unwrap();
         assert_eq!(reopened.state.lock().unwrap().rules.len(), 1);
+    }
+
+    #[test]
+    fn exact_name_controls_a_rule_and_every_result_contains_its_uuid() {
+        let root = private_tempdir();
+        let manager = DaemonManager::open(root.path()).unwrap();
+        let id = Uuid::new_v4();
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let rule = json!({"kind":"local","id":id,"name":"web app","ssh_host_alias":"host","bind_address":"127.0.0.1","bind_port":port,"destination_host":"127.0.0.1","destination_port":3000,"auto_start":false,"reconnect":false});
+        assert_eq!(
+            result(manager.handle(&request(Operation::ForwardAdd, rule)))["rule_id"],
+            id.to_string()
+        );
+        let selector = json!({"rule_name":"web app"});
+        let started = result(manager.handle(&request(Operation::ForwardStart, selector.clone())));
+        assert_eq!(started["rule_id"], id.to_string());
+        assert_eq!(started["changed"], true);
+        let repeated = result(manager.handle(&request(Operation::ForwardStart, selector.clone())));
+        assert_eq!(repeated["rule_id"], id.to_string());
+        assert_eq!(repeated["changed"], false);
+
+        let removal = failure(manager.handle(&request(Operation::ForwardRemove, selector.clone())));
+        assert_eq!(removal.code, ErrorCode::Conflict);
+        let stopped = result(manager.handle(&request(Operation::ForwardStop, selector.clone())));
+        assert_eq!(stopped["rule_id"], id.to_string());
+        assert_eq!(stopped["changed"], true);
+        let repeated = result(manager.handle(&request(Operation::ForwardStop, selector.clone())));
+        assert_eq!(repeated["changed"], false);
+        let removed = result(manager.handle(&request(Operation::ForwardRemove, selector)));
+        assert_eq!(removed["rule_id"], id.to_string());
+        assert_eq!(removed["removed"], true);
+    }
+
+    #[test]
+    fn occupied_explicit_local_port_is_a_structured_conflict() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let root = private_tempdir();
+        let manager = DaemonManager::open(root.path()).unwrap();
+        let id = Uuid::new_v4();
+        let rule = json!({"kind":"local","id":id,"name":"web","ssh_host_alias":"host","bind_address":"127.0.0.1","bind_port":port,"destination_host":"127.0.0.1","destination_port":3000,"auto_start":false,"reconnect":false});
+        result(manager.handle(&request(Operation::ForwardAdd, rule)));
+
+        let error =
+            failure(manager.handle(&request(Operation::ForwardStart, json!({"rule_id":id}))));
+        assert_eq!(error.code, ErrorCode::Conflict);
+        assert!(error.message.contains("already in use"));
+        assert_eq!(
+            result(manager.handle(&request(Operation::Status, json!({}))))["active"],
+            0
+        );
     }
 }

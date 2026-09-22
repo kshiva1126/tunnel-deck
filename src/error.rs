@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use crate::ipc::ErrorCode;
+
 /// Errors that may reach the process entry point.
 #[derive(Debug, Error)]
 pub enum AppError {
@@ -11,6 +13,12 @@ pub enum AppError {
 
     #[error("IPC error: {0}")]
     Ipc(String),
+
+    #[error("daemon request failed ({code:?}): {message}")]
+    Daemon { code: ErrorCode, message: String },
+
+    #[error("{{\"error\":{{\"code\":\"{code}\",\"message\":{message}}}}}", code = error_code_name(*code), message = serde_json::to_string(message).unwrap_or_else(|_| "\"unavailable\"".to_owned()))]
+    JsonDaemon { code: ErrorCode, message: String },
 
     #[error("SSH host operation failed: {0}")]
     Host(#[from] crate::application::hosts::HostError),
@@ -26,6 +34,9 @@ pub enum ExitStatus {
     Success = 0,
     Usage = 2,
     Unavailable = 3,
+    NotFound = 4,
+    Conflict = 5,
+    ServiceUnavailable = 6,
     Software = 70,
 }
 
@@ -34,11 +45,32 @@ impl From<&AppError> for ExitStatus {
         match error {
             AppError::Unavailable { .. } => Self::Unavailable,
             AppError::Host(crate::application::hosts::HostError::InvalidAlias(_)) => Self::Usage,
+            AppError::Daemon { code, .. } | AppError::JsonDaemon { code, .. } => match code {
+                ErrorCode::InvalidRequest
+                | ErrorCode::MessageTooLarge
+                | ErrorCode::UnsupportedVersion => Self::Usage,
+                ErrorCode::NotFound => Self::NotFound,
+                ErrorCode::Conflict => Self::Conflict,
+                ErrorCode::Unavailable => Self::ServiceUnavailable,
+                ErrorCode::Internal => Self::Software,
+            },
             AppError::Configuration(_)
             | AppError::Ipc(_)
             | AppError::Host(_)
             | AppError::Connection(_) => Self::Software,
         }
+    }
+}
+
+fn error_code_name(code: ErrorCode) -> &'static str {
+    match code {
+        ErrorCode::InvalidRequest => "invalid_request",
+        ErrorCode::MessageTooLarge => "message_too_large",
+        ErrorCode::UnsupportedVersion => "unsupported_version",
+        ErrorCode::NotFound => "not_found",
+        ErrorCode::Conflict => "conflict",
+        ErrorCode::Unavailable => "unavailable",
+        ErrorCode::Internal => "internal",
     }
 }
 
