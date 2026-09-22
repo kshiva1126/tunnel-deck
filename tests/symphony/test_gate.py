@@ -395,6 +395,32 @@ class HookTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.root / "codex-ran").exists())
 
+    def test_missing_trusted_credential_halts_without_fallback_in_both_modes(self):
+        for docker in (False, True):
+            for token in (None, ""):
+                with self.subTest(docker=docker, token=token):
+                    if docker:
+                        self.env.update(SYMPHONY_AGENT_UID=str(os.getuid()),
+                                        SYMPHONY_AGENT_GID=str(os.getgid()))
+                    if token is None:
+                        self.env.pop("SYMPHONY_GITHUB_TOKEN", None)
+                    else:
+                        self.env["SYMPHONY_GITHUB_TOKEN"] = token
+                    # GH_TOKEN and GITHUB_TOKEN remain set: neither authorizes
+                    # admission when the trusted workflow credential is absent.
+                    before = self.assert_blocked()
+                    self.assertIn("GitHub credential unavailable", before.stderr)
+                    self.assertEqual(self.calls(), "")
+                    self.assertFalse((self.root / "state/GH-24.permit").exists())
+                    result = subprocess.run(
+                        [sys.executable, str(SCRIPTS / "worker.py"), "codex", "app-server"],
+                        env=self.env, text=True, capture_output=True, timeout=10)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertNotIn("synthetic-secret", result.stdout + result.stderr)
+                    self.assertFalse((self.root / "codex-ran").exists())
+                    self.assertEqual(self.calls(), "")
+                    self.clear_stop()
+
     def test_manual_recovery_requires_fresh_dependency_check(self):
         self.config["dependencies"] = [[dependency(22, "open")]]
         self.save()

@@ -112,6 +112,11 @@ automatic reruns do not update previously published PRs. This deliberately
 trades automatic PR follow-up for protection against replaying merged work.
 API errors, inaccessible dependencies, missing permissions, timeouts, unknown
 states, and invalid/incomplete responses all refuse admission. Validation
+also covers missing or empty `SYMPHONY_GITHUB_TOKEN`: the gate never falls back
+to `GH_TOKEN`, `GITHUB_TOKEN`, or CLI-stored credentials. It persists a stop and
+requests worker shutdown because it cannot remove `agent-ready` without the
+trusted credential. Restore that credential before following recovery below.
+Response validation
 includes JSON nesting beyond the decoder's limit: this also persists a stop
 record so a malformed response cannot cause repeated API calls on retries.
 Duplicate JSON object fields are also rejected rather than accepting the last
@@ -309,3 +314,12 @@ publish hook from running. Repeated after hooks and redispatch make no further
 external calls; redispatch requests worker shutdown. Existing production code
 already satisfies these cases, so this follow-up changes tests and evidence
 only. Native GitHub E2E, Docker runtime isolation, and native macOS were not run.
+
+Missing-credential verification (2026-09-22): all 28 harness tests and the
+three required Rust checks passed on Linux. The added regression covers absent
+and empty trusted tokens in host and simulated Docker command modes, with
+`GH_TOKEN` and `GITHUB_TOKEN` still set. Both refuse admission, persist a stop,
+halt redispatch and worker restart, and invoke no GitHub, Git, Codex, or publish
+commands. Existing production code already satisfies this behavior; this
+follow-up adds regression coverage and documents recovery. Native dependency
+E2E, Docker runtime isolation, and remote Linux/macOS CI remain unverified.
