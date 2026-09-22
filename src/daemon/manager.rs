@@ -3,7 +3,7 @@
 use crate::{
     config::{ConfigStore, ConfigV1, Rule as WireRule},
     daemon::lifecycle::RequestHandler,
-    domain::rule::Rule,
+    domain::{rule::Rule, validation::validate_rule_set},
     ipc::{self, ErrorCode, Event, EventHub, Operation, Request, Response},
 };
 use serde::Deserialize;
@@ -59,6 +59,10 @@ impl DaemonManager {
                 let id = rule.id().as_uuid();
                 let mut next = state.rules.clone();
                 next.push(rule);
+                validate_rule_set(&next).map_err(|errors| {
+                    let error = crate::config::StoreError::InvalidRules(errors);
+                    (ErrorCode::Conflict, error.to_string())
+                })?;
                 state.store.save(&next).map_err(internal)?;
                 state.rules = next;
                 self.events
@@ -176,6 +180,13 @@ mod tests {
             Response::Failure(value) => panic!("unexpected error: {:?}", value.error),
         }
     }
+
+    fn failure(response: Response) -> crate::ipc::ProtocolError {
+        match response {
+            Response::Failure(value) => value.error,
+            Response::Success(value) => panic!("unexpected success: {:?}", value.result),
+        }
+    }
     #[test]
     fn mutations_are_persisted_and_start_stop_are_idempotent() {
         let root = private_tempdir();
@@ -226,5 +237,23 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn conflicting_rule_set_is_reported_without_persistence() {
+        let root = private_tempdir();
+        let manager = DaemonManager::open(root.path()).unwrap();
+        let first_id = Uuid::new_v4();
+        let second_id = Uuid::new_v4();
+        let rule = |id| json!({"kind":"dynamic","id":id,"name":"proxy","ssh_host_alias":"host","bind_address":"127.0.0.1","bind_port":1080,"auto_start":false,"reconnect":false});
+        result(manager.handle(&request(Operation::ForwardAdd, rule(first_id))));
+
+        let error = failure(manager.handle(&request(Operation::ForwardAdd, rule(second_id))));
+        assert_eq!(error.code, ErrorCode::Conflict);
+        assert!(error.message.contains("DuplicateName"));
+
+        drop(manager);
+        let reopened = DaemonManager::open(root.path()).unwrap();
+        assert_eq!(reopened.state.lock().unwrap().rules.len(), 1);
     }
 }

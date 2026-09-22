@@ -40,14 +40,14 @@ enum Command {
         #[command(subcommand)]
         command: HostCommand,
     },
-    /// Manage forwarding rules (not implemented)
+    /// Manage forwarding rules
     Forward {
         #[command(subcommand)]
         command: ForwardCommand,
     },
-    /// Show daemon and tunnel status (not implemented)
+    /// Show daemon and tunnel status
     Status,
-    /// Internal daemon commands (not implemented)
+    /// Internal daemon commands
     #[command(hide = true)]
     Daemon {
         #[command(subcommand)]
@@ -73,27 +73,27 @@ struct HostAliasArgs {
 
 #[derive(Debug, Subcommand)]
 enum ForwardCommand {
-    /// List forwarding rules (not implemented)
+    /// List forwarding rules
     List,
     /// Add a forwarding rule (not implemented)
     Add,
-    /// Remove a stopped forwarding rule (not implemented)
+    /// Remove a stopped forwarding rule
     Remove(RuleArgs),
-    /// Start a forwarding rule (not implemented)
+    /// Start a forwarding rule
     Start(RuleArgs),
-    /// Stop a forwarding rule (not implemented)
+    /// Stop a forwarding rule
     Stop(RuleArgs),
 }
 
 #[derive(Debug, Args)]
 struct RuleArgs {
-    /// Rule UUID or exact unique name
+    /// Rule UUID
     rule: String,
 }
 
 #[derive(Debug, Subcommand)]
 enum DaemonCommand {
-    /// Run the per-user daemon (not implemented)
+    /// Run the per-user daemon
     Run,
 }
 

@@ -39,8 +39,8 @@ The CLI remains available for automation:
 tdeck                         Open the TUI
 tdeck host list               List discovered SSH hosts
 tdeck forward list            List forwarding rules
-tdeck forward start <name>    Start a rule
-tdeck forward stop <name>     Stop a rule
+tdeck forward start <uuid>    Start a rule
+tdeck forward stop <uuid>     Stop a rule
 tdeck status                  Show a concise status summary
 ```
 

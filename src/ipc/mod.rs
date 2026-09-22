@@ -113,6 +113,10 @@ pub enum TransportError {
     RequestIdMismatch,
     #[error("IPC protocol version mismatch (expected 1, received {0})")]
     VersionMismatch(u32),
+    #[error("IPC subscription acknowledgement was invalid")]
+    InvalidSubscriptionAcknowledgement,
+    #[error("IPC subscription was rejected: {0:?}")]
+    SubscriptionRejected(ErrorCode),
 }
 
 pub fn read_frame<T: serde::de::DeserializeOwned>(
@@ -143,7 +147,7 @@ pub fn write_frame<T: Serialize>(writer: &mut impl Write, value: &T) -> Result<(
 }
 
 pub struct Client {
-    stream: UnixStream,
+    reader: BufReader<UnixStream>,
     timeout: Duration,
 }
 impl Client {
@@ -162,12 +166,15 @@ impl Client {
         let stream = UnixStream::connect(path)?;
         stream.set_read_timeout(Some(timeout))?;
         stream.set_write_timeout(Some(timeout))?;
-        Ok(Self { stream, timeout })
+        Ok(Self {
+            reader: BufReader::new(stream),
+            timeout,
+        })
     }
     pub fn call(&mut self, request: &Request) -> Result<Response, TransportError> {
-        self.stream.set_read_timeout(Some(self.timeout))?;
-        write_frame(&mut self.stream, request)?;
-        let response: Response = read_frame(&mut BufReader::new(&self.stream))?;
+        self.reader.get_mut().set_read_timeout(Some(self.timeout))?;
+        write_frame(self.reader.get_mut(), request)?;
+        let response: Response = read_frame(&mut self.reader)?;
         let (version, id) = match &response {
             Response::Success(v) => (v.protocol_version, v.request_id),
             Response::Failure(v) => (v.protocol_version, v.request_id),
@@ -179,6 +186,34 @@ impl Client {
             return Err(TransportError::RequestIdMismatch);
         }
         Ok(response)
+    }
+
+    pub fn subscribe(mut self) -> Result<Subscription, TransportError> {
+        let request = Request::new(Operation::Subscribe, Value::Object(Default::default()));
+        match self.call(&request)? {
+            Response::Success(value)
+                if value.result.get("subscribed").and_then(Value::as_bool) == Some(true) =>
+            {
+                Ok(Subscription {
+                    reader: self.reader,
+                })
+            }
+            Response::Success(_) => Err(TransportError::InvalidSubscriptionAcknowledgement),
+            Response::Failure(value) => Err(TransportError::SubscriptionRejected(value.error.code)),
+        }
+    }
+}
+
+pub struct Subscription {
+    reader: BufReader<UnixStream>,
+}
+impl Subscription {
+    pub fn read_event(&mut self) -> Result<Event, TransportError> {
+        let event: Event = read_frame(&mut self.reader)?;
+        if event.protocol_version != PROTOCOL_VERSION {
+            return Err(TransportError::VersionMismatch(event.protocol_version));
+        }
+        Ok(event)
     }
 }
 
@@ -318,6 +353,65 @@ mod tests {
         assert!(
             matches!(client.call(&Request::new(Operation::Status, Value::Null)), Err(TransportError::Io(error)) if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut))
         );
+        task.join().unwrap();
+    }
+
+    #[test]
+    fn subscription_preserves_buffered_events_after_acknowledgement() {
+        use std::{os::unix::net::UnixStream, thread};
+
+        let (client_stream, mut server_stream) = UnixStream::pair().unwrap();
+        let task = thread::spawn(move || {
+            let reader_stream = server_stream.try_clone().unwrap();
+            let request: Request = read_frame(&mut BufReader::new(reader_stream)).unwrap();
+            assert_eq!(request.operation, Operation::Subscribe);
+            write_frame(
+                &mut server_stream,
+                &success(request.request_id, serde_json::json!({"subscribed": true})),
+            )
+            .unwrap();
+            write_frame(
+                &mut server_stream,
+                &Event {
+                    protocol_version: PROTOCOL_VERSION,
+                    sequence: 7,
+                    event: "changed".to_owned(),
+                    payload: Value::Null,
+                },
+            )
+            .unwrap();
+        });
+        let client = Client {
+            reader: BufReader::new(client_stream),
+            timeout: DEFAULT_TIMEOUT,
+        };
+        let mut subscription = client.subscribe().unwrap();
+        assert_eq!(subscription.read_event().unwrap().sequence, 7);
+        task.join().unwrap();
+    }
+
+    #[test]
+    fn subscription_rejects_a_mismatched_acknowledgement() {
+        use std::{os::unix::net::UnixStream, thread};
+
+        let (client_stream, mut server_stream) = UnixStream::pair().unwrap();
+        let task = thread::spawn(move || {
+            let reader_stream = server_stream.try_clone().unwrap();
+            let _: Request = read_frame(&mut BufReader::new(reader_stream)).unwrap();
+            write_frame(
+                &mut server_stream,
+                &success(Uuid::new_v4(), serde_json::json!({"subscribed": true})),
+            )
+            .unwrap();
+        });
+        let client = Client {
+            reader: BufReader::new(client_stream),
+            timeout: DEFAULT_TIMEOUT,
+        };
+        assert!(matches!(
+            client.subscribe(),
+            Err(TransportError::RequestIdMismatch)
+        ));
         task.join().unwrap();
     }
 }
