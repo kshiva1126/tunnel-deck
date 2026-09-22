@@ -30,6 +30,7 @@ CHECKS = (
     ("completion", ("completion", "bash")),
     ("manpage", ("manpage",)),
 )
+COMMAND_TIMEOUT_SECONDS = 30
 
 
 def runner_identity() -> tuple[str, str]:
@@ -73,7 +74,19 @@ def extract_archive(
     )
 
 
-def run_checks(binary: Path) -> list[dict]:
+def output_is_valid(name: str, output: str, version: str) -> bool:
+    if name == "version":
+        return output.strip() == f"tdeck {version}"
+    if name == "help":
+        return "Usage: tdeck" in output and "Commands:" in output
+    if name == "completion":
+        return "_tdeck()" in output and "complete -F _tdeck" in output
+    if name == "manpage":
+        return ".TH tdeck 1" in output and ".SH NAME" in output
+    return False
+
+
+def run_checks(binary: Path, version: str) -> list[dict]:
     results = []
     for name, arguments in CHECKS:
         completed = subprocess.run(
@@ -82,9 +95,11 @@ def run_checks(binary: Path) -> list[dict]:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            text=True,
+            timeout=COMMAND_TIMEOUT_SECONDS,
         )
-        if not completed.stdout:
-            raise RuntimeError(f"{name} produced no output")
+        if not output_is_valid(name, completed.stdout, version):
+            raise RuntimeError(f"{name} produced unexpected output")
         results.append({"name": name, "arguments": list(arguments), "status": "passed"})
     return results
 
@@ -92,27 +107,37 @@ def run_checks(binary: Path) -> list[dict]:
 def smoke(metadata_path: Path) -> None:
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     target = metadata.get("target")
-    if target not in TARGET_RUNNERS:
-        raise RuntimeError(f"unsupported smoke target: {target}")
-    actual_runner = runner_identity()
-    if actual_runner != TARGET_RUNNERS[target]:
-        raise RuntimeError(
-            f"target {target} requires runner {TARGET_RUNNERS[target]}, got {actual_runner}"
-        )
-    if metadata.get("native_smoke_test", {}).get("status") != "not_run":
-        raise RuntimeError("input archive must have unverified smoke status")
-
-    archive_path = metadata_path.with_name(metadata["archive"])
+    archive_name = metadata.get("archive")
+    if not isinstance(archive_name, str) or Path(archive_name).name != archive_name:
+        raise RuntimeError("metadata does not contain a safe archive name")
+    archive_path = metadata_path.with_name(archive_name)
     checksum_path = metadata_path.with_suffix(".sha256")
     stem = archive_path.name.removesuffix(".tar.gz")
     try:
+        if target not in TARGET_RUNNERS:
+            raise RuntimeError(f"unsupported smoke target: {target}")
+        actual_runner = runner_identity()
+        if actual_runner != TARGET_RUNNERS[target]:
+            raise RuntimeError(
+                f"target {target} requires runner {TARGET_RUNNERS[target]}, got {actual_runner}"
+            )
+        if metadata.get("native_smoke_test", {}).get("status") != "not_run":
+            raise RuntimeError("input archive must have unverified smoke status")
+        checksum_parts = checksum_path.read_text(encoding="ascii").strip().split("  ")
+        if (
+            len(checksum_parts) != 2
+            or checksum_parts[1] != archive_path.name
+            or checksum_parts[0] != package.sha256(archive_path)
+        ):
+            raise RuntimeError("candidate archive checksum does not match its sidecar")
+
         with tempfile.TemporaryDirectory() as first_directory:
             binary, license_path, notices_path, archived_metadata, epoch = extract_archive(
                 archive_path, Path(first_directory), stem
             )
             if archived_metadata != metadata:
                 raise RuntimeError("archive and sidecar metadata differ before smoke")
-            checks = run_checks(binary)
+            checks = run_checks(binary, metadata["version"])
             metadata["native_smoke_test"] = {
                 "status": "passed",
                 "target": target,
@@ -138,7 +163,7 @@ def smoke(metadata_path: Path) -> None:
             )
             if archived_metadata != metadata:
                 raise RuntimeError("final archive and sidecar metadata differ")
-            run_checks(binary)
+            run_checks(binary, metadata["version"])
     except BaseException:
         for path in (archive_path, metadata_path, checksum_path):
             try:

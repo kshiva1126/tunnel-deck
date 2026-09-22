@@ -111,8 +111,8 @@ recorded once in [the release audit](release-audit.md).
 No IPC, persistence, authentication, or process-ownership contract changes in
 this audit. Same-user connection/thread and configured guardian counts remain
 OS-limited rather than application-limited; future caps require a focused
-compatibility-reviewed hardening change. Native release-archive smoke, macOS 13
-and Intel validation, signing, and notarization remain release-owner work.
+compatibility-reviewed hardening change. macOS 13 and Intel validation, signing,
+and notarization remain release-owner work.
 
 ## One private OpenSSH master per rule
 

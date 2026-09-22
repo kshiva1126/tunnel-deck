@@ -50,7 +50,15 @@ class ReleasePackagingTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             binary = root / "tdeck"
-            binary.write_text("#!/bin/sh\nprintf 'generated output\\n'\n")
+            binary.write_text(
+                "#!/bin/sh\n"
+                "case \"$1\" in\n"
+                "  --version) printf 'tdeck 0.1.0\\n' ;;\n"
+                "  --help) printf 'Usage: tdeck\\nCommands:\\n' ;;\n"
+                "  completion) printf '_tdeck() {}\\ncomplete -F _tdeck tdeck\\n' ;;\n"
+                "  manpage) printf '.TH tdeck 1\\n.SH NAME\\n' ;;\n"
+                "esac\n"
+            )
             binary.chmod(0o755)
             output = root / "out"
             arguments = [
@@ -95,7 +103,7 @@ class ReleasePackagingTest(unittest.TestCase):
             archive = root / f"{stem}.tar.gz"
             checksum = root / f"{stem}.sha256"
             metadata = {
-                "target": "x86_64-unknown-linux-gnu", "archive": archive.name,
+                "version": "0.1.0", "target": "x86_64-unknown-linux-gnu", "archive": archive.name,
                 "native_smoke_test": {"status": "not_run"}, "build": {"source_revision": "abc123"},
             }
             package.write_archive(
@@ -110,6 +118,48 @@ class ReleasePackagingTest(unittest.TestCase):
             self.assertFalse(metadata_path.exists())
             self.assertFalse(archive.exists())
             self.assertFalse(checksum.exists())
+
+    def test_native_smoke_rejects_bad_candidate_checksum_and_cleans_outputs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary = root / "tdeck"
+            license_path = root / "LICENSE"
+            notices_path = root / "THIRD_PARTY_LICENSES.txt"
+            binary.write_text("#!/bin/sh\nexit 0\n")
+            binary.chmod(0o755)
+            license_path.write_text("license")
+            notices_path.write_text("notices")
+            stem = "tunnel-deck-0.1.0-x86_64-unknown-linux-gnu"
+            metadata_path = root / f"{stem}.json"
+            archive = root / f"{stem}.tar.gz"
+            checksum = root / f"{stem}.sha256"
+            metadata = {
+                "version": "0.1.0",
+                "target": "x86_64-unknown-linux-gnu",
+                "archive": archive.name,
+                "native_smoke_test": {"status": "not_run"},
+                "build": {"source_revision": "abc123"},
+            }
+            package.write_archive(
+                archive, stem, binary, license_path, notices_path, metadata, 1
+            )
+            package.write_sidecars(archive, metadata_path, checksum, metadata)
+            checksum.write_text(f"{'0' * 64}  {archive.name}\n")
+            with mock.patch.object(
+                smoke, "runner_identity", return_value=("Linux", "x86_64")
+            ):
+                with self.assertRaisesRegex(RuntimeError, "checksum"):
+                    smoke.smoke(metadata_path)
+            self.assertFalse(metadata_path.exists())
+            self.assertFalse(archive.exists())
+            self.assertFalse(checksum.exists())
+
+    def test_run_checks_requires_recognizable_output_and_sets_timeout(self):
+        completed = mock.Mock(returncode=0, stdout="placeholder\n", stderr="")
+        with mock.patch.object(smoke.subprocess, "run", return_value=completed) as run:
+            with self.assertRaisesRegex(RuntimeError, "unexpected output"):
+                smoke.run_checks(Path("tdeck"), "0.1.0")
+        self.assertEqual(smoke.COMMAND_TIMEOUT_SECONDS, run.call_args.kwargs["timeout"])
 
     def test_third_party_notices_match_locked_release_dependencies(self):
         from scripts.licenses import generate
