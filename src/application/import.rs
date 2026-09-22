@@ -94,6 +94,7 @@ pub fn preview_effective_forwards(
     HostAlias::new(alias).map_err(|_| InvalidReason::Syntax)?;
     let text = std::str::from_utf8(output).map_err(|_| InvalidReason::NonUtf8Output)?;
     let running: HashSet<_> = running_rule_ids.iter().copied().collect();
+    let local_default_bind = effective_local_default_bind(text);
     let mut seen = HashMap::<ImportForwarding, usize>::new();
     let mut accepted = Vec::<ImportForwarding>::new();
     let mut candidates = Vec::new();
@@ -108,7 +109,7 @@ pub fn preview_effective_forwards(
             "dynamicforward" => DirectiveKind::Dynamic,
             _ => continue,
         };
-        let parsed = parse_forward(kind, value.trim());
+        let parsed = parse_forward(kind, value.trim(), local_default_bind);
         let (forwarding, classification) = match parsed {
             Err(ParseFailure::Unsupported(reason)) => {
                 (None, ImportClassification::Unsupported { reason })
@@ -184,14 +185,31 @@ fn classify(
     ImportClassification::Supported
 }
 
-fn parse_forward(kind: DirectiveKind, value: &str) -> Result<ImportForwarding, ParseFailure> {
+fn effective_local_default_bind(output: &str) -> &'static str {
+    if output.lines().any(|line| {
+        line.split_once(char::is_whitespace)
+            .is_some_and(|(key, value)| {
+                key.eq_ignore_ascii_case("gatewayports") && value.trim() == "yes"
+            })
+    }) {
+        "*"
+    } else {
+        "localhost"
+    }
+}
+
+fn parse_forward(
+    kind: DirectiveKind,
+    value: &str,
+    local_default_bind: &str,
+) -> Result<ImportForwarding, ParseFailure> {
     let fields: Vec<_> = value.split_whitespace().collect();
     if fields.iter().any(|field| looks_like_socket(field)) {
         return Err(ParseFailure::Unsupported(UnsupportedReason::UnixSocket));
     }
     match (kind, fields.as_slice()) {
         (DirectiveKind::Local, [listen, destination]) => {
-            let (bind_address, bind_port) = parse_listener(listen)?;
+            let (bind_address, bind_port) = parse_listener(listen, local_default_bind)?;
             let (destination_host, destination_port) = parse_destination(destination)?;
             Ok(ImportForwarding::Local {
                 bind_address,
@@ -201,7 +219,7 @@ fn parse_forward(kind: DirectiveKind, value: &str) -> Result<ImportForwarding, P
             })
         }
         (DirectiveKind::Remote, [listen, destination]) => {
-            let (bind_address, bind_port) = parse_listener(listen)?;
+            let (bind_address, bind_port) = parse_listener(listen, "localhost")?;
             let (destination_host, destination_port) = parse_destination(destination)?;
             Ok(ImportForwarding::Remote {
                 bind_address,
@@ -211,11 +229,11 @@ fn parse_forward(kind: DirectiveKind, value: &str) -> Result<ImportForwarding, P
             })
         }
         (DirectiveKind::Remote, [listen]) => {
-            parse_listener(listen)?;
+            parse_listener(listen, "localhost")?;
             Err(ParseFailure::Unsupported(UnsupportedReason::RemoteDynamic))
         }
         (DirectiveKind::Dynamic, [listen]) => {
-            let (bind_address, bind_port) = parse_listener(listen)?;
+            let (bind_address, bind_port) = parse_listener(listen, local_default_bind)?;
             Ok(ImportForwarding::Dynamic {
                 bind_address,
                 bind_port,
@@ -226,12 +244,12 @@ fn parse_forward(kind: DirectiveKind, value: &str) -> Result<ImportForwarding, P
 }
 
 fn looks_like_socket(value: &str) -> bool {
-    value.starts_with('/') || value.starts_with("~/")
+    value.contains('/')
 }
 
-fn parse_listener(value: &str) -> Result<(String, u16), ParseFailure> {
+fn parse_listener(value: &str, default_bind: &str) -> Result<(String, u16), ParseFailure> {
     if value.chars().all(|character| character.is_ascii_digit()) {
-        return Ok(("localhost".to_owned(), parse_port(value)?));
+        return Ok((default_bind.to_owned(), parse_port(value)?));
     }
     let (address, port) = split_endpoint(value)?;
     BindAddress::new(address.clone())
@@ -513,5 +531,41 @@ mod tests {
             preview_effective_forwards("sample", &[0xff], &[], &[]),
             Err(InvalidReason::NonUtf8Output)
         );
+    }
+
+    #[test]
+    fn gateway_ports_changes_only_omitted_local_listener_defaults() {
+        let preview = preview_effective_forwards(
+            "sample",
+            b"gatewayports yes\nlocalforward 3000 [::1]:80\ndynamicforward 1080\nremoteforward 9000 [::1]:90\n",
+            &[],
+            &[],
+        )
+        .unwrap();
+        assert!(matches!(
+            preview.candidates[0].forwarding,
+            Some(ImportForwarding::Local { ref bind_address, .. }) if bind_address == "*"
+        ));
+        assert!(matches!(
+            preview.candidates[1].forwarding,
+            Some(ImportForwarding::Dynamic { ref bind_address, .. }) if bind_address == "*"
+        ));
+        assert!(matches!(
+            preview.candidates[2].forwarding,
+            Some(ImportForwarding::Remote { ref bind_address, .. }) if bind_address == "localhost"
+        ));
+    }
+
+    #[test]
+    fn relative_unix_socket_paths_are_unsupported() {
+        let preview =
+            preview_effective_forwards("sample", b"localforward 3000 ./service.sock\n", &[], &[])
+                .unwrap();
+        assert!(matches!(
+            preview.candidates[0].classification,
+            ImportClassification::Unsupported {
+                reason: UnsupportedReason::UnixSocket
+            }
+        ));
     }
 }

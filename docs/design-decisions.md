@@ -375,9 +375,10 @@ not allocate rule IDs or names because selection and saving belong to a later
 issue.
 
 OpenSSH's bracketed IPv4/IPv6 output is normalized to unbracketed domain values.
-An omitted bind address is represented as `localhost`, preserving OpenSSH's
-loopback-family intent instead of narrowing it to IPv4. Exact repeated effective
-directives and exact existing rules are duplicates. A different Local/Dynamic
+An omitted Local/Dynamic bind address is represented as `*` when the effective
+client `GatewayPorts` value is `yes`, and as `localhost` otherwise. An omitted
+Remote bind remains `localhost` because the remote server's policy is separate.
+Exact repeated effective directives and exact existing rules are duplicates. A different Local/Dynamic
 candidate whose local listener overlaps an earlier supported candidate or an
 existing rule is a conflict. Remote listeners conflict only for the same SSH
 alias; they do not consume a local listener. An exact existing rule reports
