@@ -111,6 +111,61 @@ fn stop_during_start_discards_the_late_forwarding_success() {
     );
 }
 
+#[test]
+fn status_remains_available_while_stop_waits_for_guardian_cleanup() {
+    use serde_json::json;
+    use std::{sync::Arc, thread};
+    use tunnel_deck::{
+        config::ConfigStore,
+        daemon::{lifecycle::RequestHandler, manager::DaemonManager},
+        ipc::{Operation, Request, Response},
+    };
+
+    let root = private_tempdir();
+    let config = root.path().join("config");
+    fs::create_dir(&config).unwrap();
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o700)).unwrap();
+    let managed_rule = rule();
+    ConfigStore::open(&config)
+        .unwrap()
+        .save(std::slice::from_ref(&managed_rule))
+        .unwrap();
+    let (ssh, _) = fake_ssh(root.path(), "trap '' TERM; while :; do sleep 1; done");
+    let manager = Arc::new(
+        DaemonManager::open_managed(
+            &config,
+            root.path().to_owned(),
+            PathBuf::from(env!("CARGO_BIN_EXE_tdeck")),
+            ssh,
+            lock(root.path()),
+        )
+        .unwrap(),
+    );
+    let id = managed_rule.id().as_uuid();
+    let request = move |operation| Request::new(operation, json!({"rule_id": id}));
+    assert!(matches!(
+        manager.handle(&request(Operation::ForwardStart)),
+        Response::Success(value) if value.result["changed"] == true
+    ));
+
+    let stopper = {
+        let manager = Arc::clone(&manager);
+        thread::spawn(move || manager.handle(&request(Operation::ForwardStop)))
+    };
+    thread::sleep(Duration::from_millis(100));
+    let status_started = Instant::now();
+    let status = manager.handle(&Request::new(Operation::Status, json!({})));
+    assert!(status_started.elapsed() < Duration::from_secs(1));
+    assert!(matches!(
+        status,
+        Response::Success(value) if value.result["active"] == 0
+    ));
+    assert!(matches!(
+        stopper.join().unwrap(),
+        Response::Success(value) if value.result["changed"] == true
+    ));
+}
+
 fn rule() -> Rule {
     Rule::local(
         RuleId::new(),
@@ -180,11 +235,14 @@ fn lease_eof_after_daemon_crash_cleans_attempt_before_releasing_lock() {
 #[test]
 fn private_master_is_forwarded_then_forced_down_and_cleaned() {
     let root = private_tempdir();
+    let descendant = root.path().join("descendant.pid");
+    let emitted = MAX_STDERR_BYTES + 1024;
     let (ssh, log) = fake_ssh(
         root.path(),
-        "trap '' TERM
-i=0; while [ $i -lt 10000 ]; do printf x >&2; i=$((i+1)); done
-while :; do sleep 1; done",
+        &format!(
+            "sleep 1000 &\nprintf '%s\\n' \"$!\" > '{}'\ntrap '' TERM\ni=0; while [ $i -lt {emitted} ]; do printf x >&2; i=$((i+1)); done\nwhile :; do sleep 1; done",
+            descendant.display()
+        ),
     );
     let started = Instant::now();
     let attempt = process::start_attempt(
@@ -207,10 +265,27 @@ while :; do sleep 1; done",
     assert!(lines[2].contains("-O forward"));
     assert!(lines[2].contains("ClearAllForwardings=no"));
     assert!(lines[2].contains("-L 127.0.0.1:39123:127.0.0.1:3000"));
+    let descendant_pid: i32 = fs::read_to_string(&descendant)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
     attempt.stop().unwrap();
     assert!(!attempt_dir.exists());
     assert!(started.elapsed() >= Duration::from_secs(5));
-    assert!(MAX_STDERR_BYTES < 10000 * 2_usize.pow(3));
+    assert!(emitted > MAX_STDERR_BYTES);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let result = unsafe { libc::kill(descendant_pid, 0) };
+        if result == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "background SSH descendant survived process-group cleanup"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 #[test]

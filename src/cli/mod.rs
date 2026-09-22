@@ -183,7 +183,12 @@ fn daemon_call(operation: Operation, payload: serde_json::Value) -> Result<(), A
     lifecycle::ensure_running(&socket, &executable, DEFAULT_TIMEOUT)
         .map_err(|error| AppError::Ipc(error.to_string()))?;
     let request = Request::new(operation, payload);
-    let response = Client::connect(&socket, DEFAULT_TIMEOUT)
+    let response_timeout = if operation == Operation::ForwardStop {
+        crate::daemon::process::STOP_RESPONSE_TIMEOUT
+    } else {
+        DEFAULT_TIMEOUT
+    };
+    let response = Client::connect(&socket, response_timeout)
         .and_then(|mut client| client.call(&request))
         .map_err(|error| AppError::Ipc(error.to_string()))?;
     match response {

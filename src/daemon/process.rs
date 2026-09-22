@@ -20,6 +20,7 @@ use uuid::Uuid;
 pub const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 pub const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 pub const STOP_GRACE: Duration = Duration::from_secs(5);
+pub const STOP_RESPONSE_TIMEOUT: Duration = Duration::from_secs(8);
 pub const MAX_STDERR_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Error)]
@@ -68,6 +69,7 @@ impl ManagedAttempt {
 impl Drop for ManagedAttempt {
     fn drop(&mut self) {
         self.lease.take();
+        let _ = wait_child(&mut self.guardian, STOP_GRACE + Duration::from_secs(2));
     }
 }
 
@@ -127,14 +129,26 @@ pub fn start_attempt(
         forward_flag,
         forward_spec,
     };
-    daemon_lease.set_read_timeout(Some(STARTUP_TIMEOUT + Duration::from_secs(1)))?;
-    write_json(&daemon_lease, &spec)?;
-    let mut reader = BufReader::new(&daemon_lease);
-    let report: GuardianReport = read_json(&mut reader)?;
-    drop(reader);
+    daemon_lease.set_read_timeout(Some(
+        STARTUP_TIMEOUT + CONTROL_TIMEOUT + STOP_GRACE + Duration::from_secs(2),
+    ))?;
+    let exchange = (|| -> Result<GuardianReport, ProcessError> {
+        write_json(&daemon_lease, &spec)?;
+        read_json(&mut BufReader::new(&daemon_lease))
+    })();
+    let report = match exchange {
+        Ok(report) => report,
+        Err(error) => {
+            drop(daemon_lease);
+            let _ = wait_child(&mut guardian, STOP_GRACE + Duration::from_secs(2));
+            let _ = fs::remove_dir_all(&spec.attempt_dir);
+            return Err(error);
+        }
+    };
     if !report.accepted {
         drop(daemon_lease);
-        let _ = guardian.wait();
+        let _ = wait_child(&mut guardian, STOP_GRACE + Duration::from_secs(2));
+        let _ = fs::remove_dir_all(&spec.attempt_dir);
         return Err(ProcessError::Startup(report.diagnostic));
     }
     daemon_lease.set_read_timeout(None)?;

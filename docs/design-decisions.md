@@ -292,7 +292,10 @@ The public daemon socket uses the existing version 1 newline-JSON contract,
 with a 1 MiB encoded-frame limit and five-second client/server I/O deadlines.
 Malformed and oversized frames close only their connection after a structured
 error. Version mismatch is rejected before dispatch. UUID request correlation
-is checked by clients. A subscription consumes its client connection and keeps
+is checked by clients. Stop responses use an eight-second client deadline so the
+five-second TERM grace and bounded guardian cleanup can finish without reporting
+a false timeout; the daemon state lock is not held during that wait. A
+subscription consumes its client connection and keeps
 one buffered reader across the acknowledgement and subsequent event frames, so
 already-buffered events are not discarded. Event sequence state is daemon-owned;
 each subscriber has a 64-event bounded queue and is disconnected on lag.
@@ -338,7 +341,7 @@ as signaling authority.
 
 GH-5 local verification (2026-09-23): Linux x86_64, Rust 1.85.0;
 `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`,
-and `cargo test --all-features` pass (70 unit tests, 5 CLI tests, 4 process
+and `cargo test --all-features` pass (70 unit tests, 5 CLI tests, 5 process
 lifecycle tests, doc-tests). An isolated OpenSSH 10.5p1 probe using disposable
 keys and configuration also passes strict host-key verification, private-master
 isolation, Local/Remote/Dynamic forwarding with real traffic, conflicts,

@@ -131,21 +131,7 @@ impl DaemonManager {
                 unreachable!("start is dispatched without holding the state lock")
             }
             Operation::ForwardStop => {
-                let id = rule_id(&request.payload)?;
-                if !state.rules.iter().any(|rule| rule.id().as_uuid() == id) {
-                    return Err((ErrorCode::NotFound, "rule was not found".to_owned()));
-                }
-                let attempt = state.running.remove(&id);
-                let changed = attempt.is_some();
-                if let Some(Attempt::Active(attempt)) = attempt {
-                    attempt
-                        .stop()
-                        .map_err(|error| (ErrorCode::Internal, error.to_string()))?;
-                }
-                if changed {
-                    self.events.publish("rule_stopped", json!({"rule_id": id}));
-                }
-                Ok(json!({"start_requested": false, "changed": changed}))
+                unreachable!("stop is dispatched without holding the state lock")
             }
             Operation::Status => {
                 let mut exited = Vec::new();
@@ -251,14 +237,40 @@ impl DaemonManager {
         self.events.publish("rule_started", json!({"rule_id": id}));
         Ok(json!({"start_requested": true, "changed": true}))
     }
+
+    fn stop(&self, request: &Request) -> Result<Value, (ErrorCode, String)> {
+        let id = rule_id(&request.payload)?;
+        let attempt = {
+            let mut state = self.state.lock().map_err(|_| {
+                (
+                    ErrorCode::Internal,
+                    "daemon state is unavailable".to_owned(),
+                )
+            })?;
+            if !state.rules.iter().any(|rule| rule.id().as_uuid() == id) {
+                return Err((ErrorCode::NotFound, "rule was not found".to_owned()));
+            }
+            state.running.remove(&id)
+        };
+        let changed = attempt.is_some();
+        if let Some(Attempt::Active(attempt)) = attempt {
+            attempt
+                .stop()
+                .map_err(|error| (ErrorCode::Internal, error.to_string()))?;
+        }
+        if changed {
+            self.events.publish("rule_stopped", json!({"rule_id": id}));
+        }
+        Ok(json!({"start_requested": false, "changed": changed}))
+    }
 }
 
 impl RequestHandler for DaemonManager {
     fn handle(&self, request: &Request) -> Response {
-        let result = if request.operation == Operation::ForwardStart {
-            self.start(request)
-        } else {
-            self.dispatch(request)
+        let result = match request.operation {
+            Operation::ForwardStart => self.start(request),
+            Operation::ForwardStop => self.stop(request),
+            _ => self.dispatch(request),
         };
         match result {
             Ok(value) => ipc::success(request.request_id, value),
