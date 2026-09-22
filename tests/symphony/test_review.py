@@ -187,6 +187,27 @@ class StateMachineTests(unittest.TestCase):
                 review.run(ROOT, 28, 99)
             self.assertEqual(remediate.call_count, 1)
 
+    def test_attempt_is_persisted_before_remediation_push(self):
+        failed = [{"name": "Linux", "output": {"summary": "new failure"}}]
+        order = []
+        p1, p2, p3, p4, p5 = self.base_patches()
+        with p1, p2, p3, p4, p5, \
+                patch.object(review, "check_state", return_value=("failed", failed, [])), \
+                patch.object(review, "git", side_effect=["a" * 40, "symphony/issue-28",
+                                                         "b" * 40, "", "b" * 40, "",
+                                                         "fixture change"]), \
+                patch.object(review, "remediation"), patch.object(review, "local_verify"), \
+                patch.object(review, "save_state",
+                             side_effect=lambda _path, state: order.append(
+                                 ("save", state["attempts"], state["fingerprint"]))), \
+                patch.object(review, "push",
+                             side_effect=lambda *_args: (_ for _ in ()).throw(
+                                 review.ReviewStopped("push failed"))):
+            with self.assertRaisesRegex(review.ReviewStopped, "push failed"):
+                review.run(ROOT, 28, 99)
+        self.assertEqual(order[0][0:2], ("save", 1))
+        self.assertRegex(order[0][2], r"^[0-9a-f]{64}$")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -467,10 +467,13 @@ def run(workspace, number, pr_number):
         if SENSITIVE.search(committed):
             transition_issue(number, "credential-like content detected after remediation")
         expected_pr(number, pr_number, sha, base_sha)
-        push(workspace, number, after, before)
+        # Consume the attempt before the external write.  A crash after the push
+        # must not restore the previous budget or lose the repeated-failure
+        # fingerprint when the trusted parent restarts.
         durable["attempts"] += 1
         durable["fingerprint"] = current
         save_state(state_path, durable)
+        push(workspace, number, after, before)
         record(workspace, number, fact=f"Remediation commit {after} was pushed to PR #{pr_number}.",
                test="cargo fmt, Clippy with warnings denied, and all-feature tests passed locally.")
 
