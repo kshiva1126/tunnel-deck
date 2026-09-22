@@ -14,8 +14,13 @@ require_command codex
 issue_number=$(issue_number_from_workspace "$workspace")
 expected_branch=$(branch_for_issue "$issue_number")
 
-git -C "$workspace" rev-parse --is-inside-work-tree >/dev/null 2>&1 || \
-  die "workspace is not a Git worktree: $workspace"
+if ! git -C "$workspace" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  [ -z "$(find "$workspace" -mindepth 1 -maxdepth 1 -print -quit)" ] || \
+    die "workspace is not an empty or valid Git worktree: $workspace"
+  rmdir "$workspace" || die "cannot replace stale workspace: $workspace"
+  mkdir "$workspace"
+  "$control_root/scripts/symphony/after_create.sh" "$workspace"
+fi
 
 current_branch=$(git -C "$workspace" branch --show-current)
 [ "$current_branch" = "$expected_branch" ] || \
