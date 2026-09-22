@@ -65,7 +65,7 @@ fn version_uses_package_version() {
 #[test]
 fn unfinished_operation_fails_explicitly() {
     let output = tdeck()
-        .args(["forward", "list"])
+        .args(["forward", "add"])
         .output()
         .expect("run unfinished command");
     assert_eq!(output.status.code(), Some(3));

@@ -122,6 +122,22 @@ Newline-delimited JSON is sufficient for the MVP if framing, maximum length,
 and embedded newline behavior are defined. A binary format is unnecessary
 until measurement demonstrates a problem.
 
+### Implemented daemon IPC foundation
+
+The client now starts `tdeck daemon run` on demand and waits for its private
+socket. The daemon holds a nonblocking `flock` on the permanent `daemon.lock`
+before removing a stale socket, so concurrent launchers cannot create two
+owners. The runtime directory and socket are validated as current-user-owned
+0700/0600 objects; unsafe objects are rejected rather than repaired.
+
+Each connection uses bounded newline JSON with a five-second I/O timeout.
+Requests carry UUID v4 IDs and version 1; responses echo the ID or return a
+stable structured error. The daemon owns configuration mutation and its
+in-memory start-request intent. Start and stop are idempotent at this boundary;
+actual OpenSSH process ownership remains in the later forwarding slice.
+Subscriptions receive monotonically numbered events through a 64-event queue;
+a subscriber is removed when its queue fills or its socket disconnects.
+
 ## State model
 
 Model rule runtime state explicitly using the transitions and deadlines in

@@ -11,9 +11,9 @@ controlling, and monitoring SSH port forwarding.
 The goal is to make common SSH tunnel operations accessible from a coherent
 TUI while retaining a concise, scriptable CLI.
 
-> The Milestone 0 Rust scaffold and SSH host discovery are implemented.
-> Forwarding, daemon, and TUI operations remain explicitly unavailable while
-> their milestone issues are open.
+> The Rust scaffold, SSH host discovery, and the per-user daemon IPC foundation
+> are implemented. OpenSSH forwarding supervision and the TUI remain explicitly
+> unavailable while their milestone issues are open.
 
 ## Intended experience
 
@@ -39,8 +39,8 @@ The CLI remains available for automation:
 tdeck                         Open the TUI
 tdeck host list               List discovered SSH hosts
 tdeck forward list            List forwarding rules
-tdeck forward start <name>    Start a rule
-tdeck forward stop <name>     Stop a rule
+tdeck forward start <uuid>    Start a rule
+tdeck forward stop <uuid>     Stop a rule
 tdeck status                  Show a concise status summary
 ```
 
