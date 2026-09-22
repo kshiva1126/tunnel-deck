@@ -141,11 +141,14 @@ fn stop_during_failed_start_does_not_record_a_spurious_failure() {
     let (ssh, _) = fake_ssh_with_check(
         root.path(),
         &format!(
+            "while [ ! -e '{}' ]; do sleep 0.01; done; exit 1",
+            release_check.display()
+        ),
+        &format!(
             "touch '{}'; while [ ! -e '{}' ]; do sleep 0.01; done; exit 1",
             check_started.display(),
             release_check.display()
         ),
-        "exit 1",
     );
     let manager = Arc::new(
         DaemonManager::open_managed(

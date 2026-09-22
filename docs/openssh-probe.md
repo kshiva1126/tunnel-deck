@@ -3,13 +3,14 @@
 Executed successfully on 2026-09-22, Linux, OpenSSH 10.5p1 / OpenSSL 3.6.4.
 This is an architecture experiment, not the Rust application or a completed
 implementation milestone. The probe is now portable to native macOS and the
-macOS CI job runs it with Apple's `/usr/bin/ssh`; a result for that change must
-still be recorded after publication.
+macOS CI job runs it with Apple's `/usr/bin/ssh`; the first complete native
+Apple Silicon result is recorded in job `106943102778`. The macOS 13 minimum,
+Intel result, and release-artifact checks remain pending.
 
 macOS is also an initial release target. The results in the table below remain
-the recorded Linux run until the native job publishes its evidence. See the
-[macOS validation checklist](macos-validation.md) for automated versus human
-checks and the architecture matrix.
+the recorded Linux run for this probe. Native CI evidence and release-artifact
+status are tracked in the [macOS validation checklist](macos-validation.md)
+for automated versus human checks and the architecture matrix.
 
 ## Reproduce
 
@@ -74,6 +75,5 @@ for the tested active-state daemon crash.
 - Ports are chosen dynamically; an unrelated process may claim one between
   selection and bind. This is an explicit integration probe, not a deterministic
   default unit test.
-- Rust formatting, Clippy, and cargo tests do not apply yet: there is no
-  Cargo.toml or Rust implementation. Run the required checks when scaffolding
-  starts.
+- Rust formatting, Clippy, and cargo tests cover the application separately;
+  they do not replace this real-OpenSSH integration evidence.
