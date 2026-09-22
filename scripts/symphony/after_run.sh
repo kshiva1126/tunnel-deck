@@ -36,6 +36,9 @@ fi
   cargo test --all-features
 )
 
+# Recheck after Rust checks, immediately before the first remote write.
+python3 "$control_root/scripts/symphony/gate.py" verify "$workspace"
+
 GIT_ASKPASS="$control_root/scripts/symphony/git-askpass.sh" \
 GIT_TERMINAL_PROMPT=0 \
 git -C "$workspace" push --set-upstream origin "$branch"

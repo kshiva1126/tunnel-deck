@@ -48,6 +48,7 @@ fi
 image=${SYMPHONY_DOCKER_IMAGE:-tunnel-deck-symphony:local}
 workspace_root=${SYMPHONY_WORKSPACE_ROOT:-$HOME/.local/share/symphony/tunnel-deck/workspaces}
 logs_root=${SYMPHONY_LOGS_ROOT:-$HOME/.local/state/symphony/tunnel-deck/logs}
+state_root=${SYMPHONY_STATE_ROOT:-$HOME/.local/state/symphony/tunnel-deck/docker-gates}
 cargo_home=${SYMPHONY_CARGO_HOME:-$HOME/.cache/symphony/tunnel-deck/cargo}
 port=${SYMPHONY_PORT:-4000}
 container_name=tunnel-deck-symphony
@@ -64,7 +65,7 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-mkdir -p "$workspace_root" "$logs_root" "$cargo_home"
+mkdir -p "$workspace_root" "$logs_root" "$cargo_home" "$state_root"
 
 docker build \
   --build-arg "WORKER_UID=$host_uid" \
@@ -88,15 +89,19 @@ container_id=$(docker run --detach --rm --init \
   --tmpfs "/home/worker/.codex:rw,nosuid,nodev,uid=$host_uid,gid=$host_gid,mode=0700" \
   --env "SYMPHONY_AGENT_UID=$host_uid" \
   --env "SYMPHONY_AGENT_GID=$host_gid" \
+  --env "SYMPHONY_STATE_ROOT=/state" \
   --publish "127.0.0.1:$port:4001" \
   --mount "type=bind,src=$control_root,dst=/control,readonly" \
   --mount "type=bind,src=$workspace_root,dst=/workspaces" \
   --mount "type=bind,src=$logs_root,dst=/logs" \
+  --mount "type=bind,src=$state_root,dst=/state" \
   --mount "type=bind,src=$cargo_home,dst=/home/worker/.cargo" \
   --mount "type=bind,src=$auth_file,dst=/run/codex-auth.json,readonly" \
   --mount "type=bind,src=$token_dir,dst=/run/github-secret" \
   "$image" \
   sh -eu -c '
+    chown root:root /state
+    chmod 0700 /state
     cp /run/codex-auth.json "$HOME/.codex/auth.json"
     chmod 0600 "$HOME/.codex/auth.json"
     chown "$SYMPHONY_AGENT_UID:$SYMPHONY_AGENT_GID" "$HOME/.codex/auth.json"
@@ -104,7 +109,7 @@ container_id=$(docker run --detach --rm --init \
     rm -f /run/github-secret/token
     export SYMPHONY_GITHUB_TOKEN
     socat TCP-LISTEN:4001,fork,reuseaddr TCP:127.0.0.1:4000 &
-    exec symphony /control/WORKFLOW.md \
+    exec python3 /control/scripts/symphony/worker.py symphony /control/WORKFLOW.md \
       --logs-root /logs \
       --port 4000 \
       --i-understand-that-this-will-be-running-without-the-usual-guardrails

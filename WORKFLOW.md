@@ -21,9 +21,9 @@ hooks:
   after_create: |
     "$SYMPHONY_CONTROL_ROOT/scripts/symphony/after_create.sh" "$PWD"
   before_run: |
-    "$SYMPHONY_CONTROL_ROOT/scripts/symphony/before_run.sh" "$PWD"
+    python3 "$SYMPHONY_CONTROL_ROOT/scripts/symphony/gate.py" before "$PWD"
   after_run: |
-    "$SYMPHONY_CONTROL_ROOT/scripts/symphony/after_run.sh" "$PWD"
+    python3 "$SYMPHONY_CONTROL_ROOT/scripts/symphony/gate.py" after "$PWD"
   timeout_ms: 1200000
 
 agent:
@@ -31,7 +31,7 @@ agent:
   max_turns: 1
 
 codex:
-  command: setpriv --reuid=$SYMPHONY_AGENT_UID --regid=$SYMPHONY_AGENT_GID --clear-groups env -u SSH_AUTH_SOCK -u SYMPHONY_GITHUB_TOKEN -u GH_TOKEN -u GITHUB_TOKEN PATH=/usr/local/cargo/bin:$PATH codex app-server
+  command: '"$SYMPHONY_CONTROL_ROOT/scripts/symphony/codex.sh"'
   approval_policy: never
   thread_sandbox: danger-full-access
   turn_sandbox_policy:

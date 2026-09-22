@@ -7,7 +7,7 @@ ARG WORKER_UID=1000
 ARG WORKER_GID=1000
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends bubblewrap ca-certificates curl git jq nodejs npm socat \
+    && apt-get install -y --no-install-recommends bubblewrap ca-certificates curl git jq nodejs npm python3 socat \
     && rm -rf /var/lib/apt/lists/* \
     && npm install --global "@openai/codex@${CODEX_VERSION}" \
     && rustup component add rustfmt clippy \
@@ -45,6 +45,7 @@ ENV HOME=/home/worker \
     SYMPHONY_AGENT_GID=1000 \
     SYMPHONY_INSTALL_DIR=/tmp/symphony-runtime \
     SYMPHONY_CONTROL_ROOT=/control \
-    SYMPHONY_WORKSPACE_ROOT=/workspaces
+    SYMPHONY_WORKSPACE_ROOT=/workspaces \
+    SYMPHONY_STATE_ROOT=/state
 
-CMD ["symphony", "/control/WORKFLOW.md", "--logs-root", "/logs", "--port", "4000", "--i-understand-that-this-will-be-running-without-the-usual-guardrails"]
+CMD ["python3", "/control/scripts/symphony/worker.py", "symphony", "/control/WORKFLOW.md", "--logs-root", "/logs", "--port", "4000", "--i-understand-that-this-will-be-running-without-the-usual-guardrails"]
