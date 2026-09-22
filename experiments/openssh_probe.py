@@ -200,7 +200,10 @@ def probe(root):
             require(control(existing_path, "check").returncode == 0, "unrelated master stopped")
         except Exception:
             # Logs contain only generated test configuration, never personal credentials.
-            print((root / "server.log").read_text()[-4000:], flush=True)
+            try:
+                print((root / "server.log").read_text()[-4000:], flush=True)
+            except OSError as error:
+                print(f"server log unavailable: {error}", flush=True)
             raise
         finally:
             for child in reversed(children):
@@ -228,7 +231,15 @@ def crash_probe(root, master, control, server_port):
             # Do not poll/reap the leader until all group signaling is finished.
             os.killpg(child.pid, signal.SIGTERM)
             time.sleep(0.3)
-            os.killpg(child.pid, signal.SIGKILL)
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except PermissionError:
+                # Darwin reports EPERM for a group containing only the exited
+                # leader. Accept it only after confirming that leader exited.
+                require(child.poll() is not None,
+                        "guardian lost permission to terminate a live SSH group")
             child.wait(timeout=3)
             lease_guardian.close()
             os.close(lock_fd)
