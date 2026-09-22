@@ -29,14 +29,17 @@ The combined job covers:
 - guardian completion through explicit pipe IPC plus listener and lock state.
   The portable harness has no `/proc`, `prctl`, or subreaper dependency.
 
-An Actions result is automated evidence only. Record the job URL, commit,
-runner OS version, architecture, `/usr/bin/ssh -V`, and result here or in the
-release checklist after the pull request is published. At the time this file
-was added, the post-publication macOS job had not run for the change.
+An Actions result is automated evidence only. The first complete native result
+for this change is [job 106943102778][native-arm64]: commit `319158b`, macOS
+26.6.2 (25G83), `arm64`, Apple OpenSSH_10.3p1 with LibreSSL 3.3.6. All Rust and
+Apple OpenSSH checks passed. This proves the current Apple Silicon runner, but
+not the macOS 13 minimum or the shipped release artifact.
+
+[native-arm64]: https://github.com/kshiva1126/tunnel-deck/actions/runs/35786079197/job/106943102778
 
 | Architecture | Minimum/native OS | Automated Rust + Apple SSH | Release artifact smoke test |
 | --- | --- | --- | --- |
-| Apple Silicon (`aarch64`) | macOS 13 | Pending native result | Pending |
+| Apple Silicon (`aarch64`) | macOS 13 pending; 26.6.2 native | Pass (`319158b`) | Pending |
 | Intel (`x86_64`) | macOS 13 | Pending native result | Pending |
 
 ## Human release-candidate checks
