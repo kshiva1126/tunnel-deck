@@ -95,6 +95,17 @@ struct RuleArgs {
 enum DaemonCommand {
     /// Run the per-user daemon
     Run,
+    /// Supervise one private SSH attempt (internal only)
+    #[command(hide = true)]
+    Guardian(GuardianArgs),
+}
+
+#[derive(Debug, Args)]
+struct GuardianArgs {
+    #[arg(long)]
+    lease_fd: i32,
+    #[arg(long)]
+    lock_fd: i32,
 }
 
 impl Cli {
@@ -120,6 +131,10 @@ impl Cli {
             Some(Command::Status) => return daemon_call(Operation::Status, serde_json::json!({})),
             Some(Command::Daemon { command }) => match command {
                 DaemonCommand::Run => return run_daemon(),
+                DaemonCommand::Guardian(args) => {
+                    return crate::daemon::process::run_guardian(args.lease_fd, args.lock_fd)
+                        .map_err(|error| AppError::Ipc(error.to_string()));
+                }
             },
         };
 
@@ -193,9 +208,23 @@ fn run_daemon() -> Result<(), AppError> {
         Err(lifecycle::DaemonError::AlreadyRunning) => return Ok(()),
         Err(error) => return Err(AppError::Ipc(error.to_string())),
     };
+    let guardian_lock = endpoint
+        .guardian_lock()
+        .map_err(|error| AppError::Ipc(error.to_string()))?;
     let config_directory = paths.config.parent().unwrap_or_else(|| Path::new("/"));
-    let manager = DaemonManager::open(config_directory)
-        .map_err(|error| AppError::Configuration(error.to_string()))?;
+    let executable = env::current_exe().map_err(|error| AppError::Ipc(error.to_string()))?;
+    let ssh = env::var_os("TDECK_SSH")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("ssh"));
+    let manager = DaemonManager::open_managed(
+        config_directory,
+        paths.runtime.clone(),
+        executable,
+        ssh,
+        guardian_lock,
+    )
+    .map_err(|error| AppError::Configuration(error.to_string()))?;
     lifecycle::run(endpoint, Arc::new(manager)).map_err(|error| AppError::Ipc(error.to_string()))
 }
 

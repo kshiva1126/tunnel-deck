@@ -35,7 +35,7 @@ pub enum DaemonError {
 
 /// Owns the permanent lock file and public socket for exactly one daemon.
 pub struct DaemonEndpoint {
-    _lock: File,
+    lock: File,
     listener: UnixListener,
     socket_path: PathBuf,
 }
@@ -80,7 +80,7 @@ impl DaemonEndpoint {
         let listener = UnixListener::bind(socket_path)?;
         fs::set_permissions(socket_path, fs::Permissions::from_mode(0o600))?;
         Ok(Self {
-            _lock: lock,
+            lock,
             listener,
             socket_path: socket_path.to_owned(),
         })
@@ -88,6 +88,12 @@ impl DaemonEndpoint {
 
     pub fn accept(&self) -> io::Result<(UnixStream, std::os::unix::net::SocketAddr)> {
         self.listener.accept()
+    }
+
+    /// Clone the same locked open-file description for a guardian. The clone
+    /// is closed (without `LOCK_UN`) after that guardian finishes cleanup.
+    pub fn guardian_lock(&self) -> io::Result<File> {
+        self.lock.try_clone()
     }
 }
 

@@ -2,15 +2,19 @@
 
 use crate::{
     config::{ConfigStore, ConfigV1, Rule as WireRule},
-    daemon::lifecycle::RequestHandler,
+    daemon::{
+        lifecycle::RequestHandler,
+        process::{self, ManagedAttempt},
+    },
     domain::{rule::Rule, validation::validate_rule_set},
     ipc::{self, ErrorCode, Event, EventHub, Operation, Request, Response},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
-    collections::HashSet,
-    path::Path,
+    collections::HashMap,
+    fs::File,
+    path::{Path, PathBuf},
     sync::{Mutex, mpsc},
 };
 use uuid::Uuid;
@@ -18,11 +22,23 @@ use uuid::Uuid;
 struct State {
     store: ConfigStore,
     rules: Vec<Rule>,
-    running: HashSet<Uuid>,
+    running: HashMap<Uuid, Attempt>,
+}
+enum Attempt {
+    Starting(Uuid),
+    Active(ManagedAttempt),
 }
 pub struct DaemonManager {
     state: Mutex<State>,
     events: EventHub,
+    process: Option<ProcessSettings>,
+}
+
+struct ProcessSettings {
+    executable: PathBuf,
+    ssh: PathBuf,
+    runtime: PathBuf,
+    lock: File,
 }
 
 impl DaemonManager {
@@ -33,10 +49,28 @@ impl DaemonManager {
             state: Mutex::new(State {
                 store,
                 rules,
-                running: HashSet::new(),
+                running: HashMap::new(),
             }),
             events: EventHub::default(),
+            process: None,
         })
+    }
+
+    pub fn open_managed(
+        config_directory: &Path,
+        runtime: PathBuf,
+        executable: PathBuf,
+        ssh: PathBuf,
+        lock: File,
+    ) -> Result<Self, crate::config::StoreError> {
+        let mut manager = Self::open(config_directory)?;
+        manager.process = Some(ProcessSettings {
+            executable,
+            ssh,
+            runtime,
+            lock,
+        });
+        Ok(manager)
     }
 
     fn dispatch(&self, request: &Request) -> Result<Value, (ErrorCode, String)> {
@@ -71,7 +105,7 @@ impl DaemonManager {
             }
             Operation::ForwardRemove => {
                 let id = rule_id(&request.payload)?;
-                if state.running.contains(&id) {
+                if state.running.contains_key(&id) {
                     return Err((
                         ErrorCode::Conflict,
                         "an active rule cannot be removed".to_owned(),
@@ -94,29 +128,45 @@ impl DaemonManager {
                 Ok(json!({"removed": true}))
             }
             Operation::ForwardStart => {
-                let id = rule_id(&request.payload)?;
-                if !state.rules.iter().any(|rule| rule.id().as_uuid() == id) {
-                    return Err((ErrorCode::NotFound, "rule was not found".to_owned()));
-                }
-                let changed = state.running.insert(id);
-                if changed {
-                    self.events.publish("rule_started", json!({"rule_id": id}));
-                }
-                Ok(json!({"start_requested": true, "changed": changed}))
+                unreachable!("start is dispatched without holding the state lock")
             }
             Operation::ForwardStop => {
                 let id = rule_id(&request.payload)?;
                 if !state.rules.iter().any(|rule| rule.id().as_uuid() == id) {
                     return Err((ErrorCode::NotFound, "rule was not found".to_owned()));
                 }
-                let changed = state.running.remove(&id);
+                let attempt = state.running.remove(&id);
+                let changed = attempt.is_some();
+                if let Some(Attempt::Active(attempt)) = attempt {
+                    attempt
+                        .stop()
+                        .map_err(|error| (ErrorCode::Internal, error.to_string()))?;
+                }
                 if changed {
                     self.events.publish("rule_stopped", json!({"rule_id": id}));
                 }
                 Ok(json!({"start_requested": false, "changed": changed}))
             }
             Operation::Status => {
-                Ok(json!({"rules": state.rules.len(), "start_requested": state.running.len()}))
+                let mut exited = Vec::new();
+                for (id, attempt) in &mut state.running {
+                    if let Attempt::Active(attempt) = attempt {
+                        if attempt.has_exited().map_err(internal)? {
+                            exited.push(*id);
+                        }
+                    }
+                }
+                for id in exited {
+                    state.running.remove(&id);
+                    self.events.publish("rule_failed", json!({"rule_id": id}));
+                }
+                let active = state
+                    .running
+                    .values()
+                    .filter(|value| matches!(value, Attempt::Active(_)))
+                    .count();
+                let starting = state.running.len() - active;
+                Ok(json!({"rules": state.rules.len(), "active": active, "starting": starting}))
             }
             Operation::Subscribe => Ok(json!({"subscribed": true})),
             _ => Err((
@@ -125,11 +175,92 @@ impl DaemonManager {
             )),
         }
     }
+
+    fn start(&self, request: &Request) -> Result<Value, (ErrorCode, String)> {
+        let id = rule_id(&request.payload)?;
+        let attempt_id = Uuid::new_v4();
+        let rule = {
+            let mut state = self.state.lock().map_err(|_| {
+                (
+                    ErrorCode::Internal,
+                    "daemon state is unavailable".to_owned(),
+                )
+            })?;
+            let rule = state
+                .rules
+                .iter()
+                .find(|rule| rule.id().as_uuid() == id)
+                .cloned()
+                .ok_or((ErrorCode::NotFound, "rule was not found".to_owned()))?;
+            if state.running.contains_key(&id) {
+                return Ok(json!({"start_requested": true, "changed": false}));
+            }
+            // The attempt ID is a cancellable Starting marker. No process call is made
+            // while the daemon state lock is held, so stop can remove it.
+            state.running.insert(id, Attempt::Starting(attempt_id));
+            rule
+        };
+        let attempt = if let Some(settings) = &self.process {
+            match process::start_attempt(
+                &settings.executable,
+                &settings.ssh,
+                &settings.runtime,
+                &settings.lock,
+                &rule,
+            ) {
+                Ok(attempt) => Some(attempt),
+                Err(error) => {
+                    let mut state = self.state.lock().map_err(|_| {
+                        (
+                            ErrorCode::Internal,
+                            "daemon state is unavailable".to_owned(),
+                        )
+                    })?;
+                    if matches!(state.running.get(&id), Some(Attempt::Starting(current)) if *current == attempt_id)
+                    {
+                        state.running.remove(&id);
+                    }
+                    return Err((ErrorCode::Unavailable, error.to_string()));
+                }
+            }
+        } else {
+            None
+        };
+        let mut state = self.state.lock().map_err(|_| {
+            (
+                ErrorCode::Internal,
+                "daemon state is unavailable".to_owned(),
+            )
+        })?;
+        if !matches!(state.running.get(&id), Some(Attempt::Starting(current)) if *current == attempt_id)
+        {
+            drop(state);
+            if let Some(attempt) = attempt {
+                attempt.stop().map_err(internal)?;
+            }
+            return Ok(json!({"start_requested": false, "changed": true}));
+        }
+        state.running.insert(
+            id,
+            match attempt {
+                Some(attempt) => Attempt::Active(attempt),
+                None => Attempt::Starting(attempt_id),
+            },
+        );
+        drop(state);
+        self.events.publish("rule_started", json!({"rule_id": id}));
+        Ok(json!({"start_requested": true, "changed": true}))
+    }
 }
 
 impl RequestHandler for DaemonManager {
     fn handle(&self, request: &Request) -> Response {
-        match self.dispatch(request) {
+        let result = if request.operation == Operation::ForwardStart {
+            self.start(request)
+        } else {
+            self.dispatch(request)
+        };
+        match result {
             Ok(value) => ipc::success(request.request_id, value),
             Err((code, message)) => ipc::failure(request.request_id, code, message),
         }

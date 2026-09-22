@@ -11,9 +11,9 @@ controlling, and monitoring SSH port forwarding.
 The goal is to make common SSH tunnel operations accessible from a coherent
 TUI while retaining a concise, scriptable CLI.
 
-> The Rust scaffold, SSH host discovery, and the per-user daemon IPC foundation
-> are implemented. OpenSSH forwarding supervision and the TUI remain explicitly
-> unavailable while their milestone issues are open.
+> The Rust scaffold, SSH host discovery, per-user daemon IPC, and Local OpenSSH
+> forwarding supervision are implemented. The TUI remains unavailable while
+> its milestone issue is open.
 
 ## Intended experience
 

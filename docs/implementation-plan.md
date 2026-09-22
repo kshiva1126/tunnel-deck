@@ -239,6 +239,13 @@ Exit criteria:
 
 ## Milestone 2 — daemon and Local forwarding vertical slice
 
+Implementation status: daemon IPC and guardian-owned Local forwarding are
+implemented on the GH-5 branch pending review and native CI. Fake-SSH lifecycle
+tests cover acceptance, early failure, bounded output, concurrent stop,
+lease-EOF cleanup, and forced termination. The repository's isolated OpenSSH
+probe supplies prior Linux protocol evidence; native execution of the Rust
+path with real OpenSSH and macOS lifecycle validation remain review conditions.
+
 Tasks:
 
 - Implement the Unix-socket server, client, framing limits, request dispatch,
