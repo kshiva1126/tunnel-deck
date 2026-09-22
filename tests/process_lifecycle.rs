@@ -136,7 +136,17 @@ fn stop_during_failed_start_does_not_record_a_spurious_failure() {
         .unwrap()
         .save(std::slice::from_ref(&managed_rule))
         .unwrap();
-    let (ssh, _) = fake_ssh_with_check(root.path(), "exit 1", "sleep 1; exit 1");
+    let check_started = root.path().join("check-started");
+    let release_check = root.path().join("release-check");
+    let (ssh, _) = fake_ssh_with_check(
+        root.path(),
+        "exit 1",
+        &format!(
+            "touch '{}'; while [ ! -e '{}' ]; do sleep 0.01; done; exit 1",
+            check_started.display(),
+            release_check.display()
+        ),
+    );
     let manager = Arc::new(
         DaemonManager::open_managed(
             &config,
@@ -154,15 +164,12 @@ fn stop_during_failed_start_does_not_record_a_spurious_failure() {
         let manager = Arc::clone(&manager);
         thread::spawn(move || manager.handle(&request(Operation::ForwardStart)))
     };
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while !fs::read_dir(root.path()).unwrap().any(|entry| {
-        entry
-            .unwrap()
-            .file_name()
-            .to_string_lossy()
-            .starts_with("attempt-")
-    }) {
-        assert!(Instant::now() < deadline);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !check_started.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "SSH readiness check did not start"
+        );
         thread::sleep(Duration::from_millis(10));
     }
 
@@ -170,6 +177,7 @@ fn stop_during_failed_start_does_not_record_a_spurious_failure() {
         manager.handle(&request(Operation::ForwardStop)),
         Response::Success(value) if value.result["changed"] == true
     ));
+    fs::write(release_check, "").unwrap();
     assert!(matches!(
         starter.join().unwrap(),
         Response::Success(value) if value.result["start_requested"] == false
