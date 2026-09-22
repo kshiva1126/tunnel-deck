@@ -116,6 +116,9 @@ includes JSON nesting beyond the decoder's limit: this also persists a stop
 record so a malformed response cannot cause repeated API calls on retries.
 Duplicate JSON object fields are also rejected rather than accepting the last
 value: conflicting issue or dependency states must never silently permit a run.
+Non-JSON constants (`NaN`, `Infinity`, and `-Infinity`) are rejected even in
+otherwise unused fields, so Python's permissive decoder cannot admit an invalid
+API response. These failures use the same durable stop and recovery procedure.
 Validation also rejects non-integer issue numbers, including JSON floating-point values
 that compare equal to the requested number. Diagnostics
 contain fixed reasons and validated dependency repository/issue identifiers,
@@ -288,3 +291,11 @@ state reproduced admission before the fix. Issue and dependency responses with
 duplicate fields now persist a stop record, suppress Codex/publication, and
 halt redispatch without further API calls. No live GitHub writes or native E2E
 were performed; the platform verification limits above still apply.
+
+Non-JSON constant follow-up: all 26 harness tests and the three required Rust
+checks passed on Linux (2026-09-22). The regression first reproduced Codex
+admission for an issue response containing `NaN`; the fix rejects all three
+non-JSON constants across issue, dependency, and PR responses, with durable
+stops and no external calls on redispatch. Real GitHub E2E, Docker runtime
+isolation, and native macOS remain unverified; their procedures and
+post-publication review requirements above are unchanged.

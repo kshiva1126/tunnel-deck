@@ -250,6 +250,26 @@ class HookTests(unittest.TestCase):
                     self.clear_stop()
             self.config[kind] = original
 
+    def test_non_json_constants_latch_and_suppress_retries(self):
+        for constant in ("NaN", "Infinity", "-Infinity"):
+            for kind in ("issue", "dependencies", "prs"):
+                with self.subTest(constant=constant, kind=kind):
+                    if kind == "issue":
+                        response = ('[{"number":24,"state":"open",'
+                                    '"labels":[{"name":"agent-ready"}],'
+                                    '"invalid":' + constant + '}]')
+                    elif kind == "dependencies":
+                        response = ('[[{"number":22,"state":"closed",'
+                                    '"repository_url":"https://api.github.com/repos/kshiva1126/tunnel-deck",'
+                                    '"invalid":' + constant + '}]]')
+                    else:
+                        response = '[[' + constant + ']]'
+                    self.config["raw"] = {kind: response}
+                    self.save()
+                    before = self.assert_blocked()
+                    self.assertIn("invalid data", before.stderr)
+                    self.clear_stop()
+
     def test_verify_is_read_only_on_success_and_refusal(self):
         for dependencies, status in (([], 0), ([dependency(22, "open")], 1)):
             with self.subTest(dependencies=dependencies):

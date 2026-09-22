@@ -26,6 +26,11 @@ def unique_object(pairs):
     return result
 
 
+def reject_constant(_value):
+    # Python accepts NaN/Infinity by default, but GitHub must return JSON.
+    raise ValueError()
+
+
 def api(endpoint, method="GET", body=None):
     env = os.environ.copy()
     token = env.get("SYMPHONY_GITHUB_TOKEN")
@@ -45,7 +50,8 @@ def api(endpoint, method="GET", body=None):
                                 text=True, timeout=API_TIMEOUT, check=True)
         if method != "GET":
             return None
-        pages = json.loads(result.stdout, object_pairs_hook=unique_object)
+        pages = json.loads(result.stdout, object_pairs_hook=unique_object,
+                           parse_constant=reject_constant)
         if not isinstance(pages, list) or not pages:
             raise ValueError()
         return pages
