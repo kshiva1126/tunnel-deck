@@ -49,7 +49,9 @@ if name == "gh":
             (root / "fixture.json").write_text(json.dumps(config))
             sys.exit(0)
         assert "--paginate" in args and "--slurp" in args
-        if config.get("deeply_nested") == kind:
+        if kind in config.get("raw", {}):
+            print(config["raw"][kind])
+        elif config.get("deeply_nested") == kind:
             print("[" * 2000 + '"synthetic-secret-do-not-log"' + "]" * 2000)
         elif config.get("malformed") == kind:
             print("{synthetic-secret-do-not-log")
@@ -220,6 +222,21 @@ class HookTests(unittest.TestCase):
                 self.config["issue"][0]["number"] = number
                 self.save()
                 self.assert_blocked()
+                self.clear_stop()
+
+    def test_duplicate_fields_cannot_hide_ineligible_state(self):
+        responses = {
+            "issue": '[{"number":24,"state":"closed","state":"open",'
+                     '"labels":[{"name":"agent-ready"}]}]',
+            "dependencies": '[[{"number":22,"state":"open","state":"closed",'
+                            '"repository_url":"https://api.github.com/repos/kshiva1126/tunnel-deck"}]]',
+        }
+        for kind, response in responses.items():
+            with self.subTest(kind=kind):
+                self.config["raw"] = {kind: response}
+                self.save()
+                before = self.assert_blocked()
+                self.assertIn("invalid data", before.stderr)
                 self.clear_stop()
 
     def test_invalid_page_shapes_fail_closed(self):

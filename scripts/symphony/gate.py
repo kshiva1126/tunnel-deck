@@ -16,6 +16,16 @@ class Refused(Exception):
     pass
 
 
+def unique_object(pairs):
+    # Do not let a later state/label silently overwrite an earlier one.
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError()
+        result[key] = value
+    return result
+
+
 def api(endpoint, method="GET", body=None):
     env = os.environ.copy()
     token = env.get("SYMPHONY_GITHUB_TOKEN")
@@ -35,7 +45,7 @@ def api(endpoint, method="GET", body=None):
                                 text=True, timeout=API_TIMEOUT, check=True)
         if method != "GET":
             return None
-        pages = json.loads(result.stdout)
+        pages = json.loads(result.stdout, object_pairs_hook=unique_object)
         if not isinstance(pages, list) or not pages:
             raise ValueError()
         return pages

@@ -114,6 +114,8 @@ API errors, inaccessible dependencies, missing permissions, timeouts, unknown
 states, and invalid/incomplete responses all refuse admission. Validation
 includes JSON nesting beyond the decoder's limit: this also persists a stop
 record so a malformed response cannot cause repeated API calls on retries.
+Duplicate JSON object fields are also rejected rather than accepting the last
+value: conflicting issue or dependency states must never silently permit a run.
 Validation also rejects non-integer issue numbers, including JSON floating-point values
 that compare equal to the requested number. Diagnostics
 contain fixed reasons and validated dependency repository/issue identifiers,
@@ -279,3 +281,10 @@ from the issue, dependency, and PR endpoints reproduced repeated API calls
 before the fix. They now create stop records, suppress Codex and publication,
 and halt redispatch without repeated external calls or response-text disclosure.
 The native E2E and platform verification limits above still apply.
+
+Duplicate-field follow-up: all 25 harness tests and the three required Rust
+checks passed on the same Linux environment. A conflicting duplicate issue
+state reproduced admission before the fix. Issue and dependency responses with
+duplicate fields now persist a stop record, suppress Codex/publication, and
+halt redispatch without further API calls. No live GitHub writes or native E2E
+were performed; the platform verification limits above still apply.
