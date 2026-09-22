@@ -190,6 +190,26 @@ Use the OS-specific defaults and override rules in
 arbitrary existing directories. Config files use mode 0600. Tests inject all
 paths and cover both OS defaults independently of the machine running the test.
 
+Application settings are daemon-owned desired configuration in the same
+`config.toml` atomic-write transaction as rules. Schema version 2 adds a
+`[settings]` table containing `theme` (`system`, `dark`, or `light`),
+`log_level` (`error` through `trace`), `default_reconnect`, and
+`default_auto_start`. Defaults are `system`, `info`, and `false` for both
+policies. Policy defaults initialize newly created rules; changing a default
+does not rewrite existing rule policy.
+
+The daemon remains the sole writer. IPC v1 adds `settings_get` and
+`settings_update`; CLI and TUI use those operations and never write TOML
+directly. The protocol version remains 1 because existing message and error
+shapes do not change; an older daemon rejects the unknown operation, prompting
+the client to report that the daemon must be upgraded or restarted.
+
+Daemon startup explicitly registers the only production migration: TOML v1
+rules become TOML v2 with default settings. Before conversion, the exact v1
+bytes are stored in a uniquely named, synced mode-0600 backup. Conversion or
+validation failure leaves the original in place. Versions other than 1 or 2
+are rejected and never overwritten or guessed.
+
 Milestone 0 remains the first implementation scope. Before building the
 Milestone 2 daemon around this process design, run an isolated real-OpenSSH
 spike covering all three forwarding types, configured extra forwards, an
@@ -225,12 +245,14 @@ files; they are never loaded or reused. The sole writer may explicitly discard
 an abandoned save by UUID once no live writer owns it, rather than scanning and
 deleting another writer's files automatically.
 
-Migration is an explicit interface, with no invented historical schema shipped.
-Unknown versions are rejected by default, including all future schemas even
-when a migration is supplied. A registered older-schema migration first writes
+Migration is an explicit interface. Schema v1 is the only registered historical
+schema; unknown versions are rejected by default, including all future schemas
+even when another migration is supplied. A registered older-schema migration
+first writes
 and syncs a unique 0600 backup of the exact original bytes and syncs its directory,
 then converts and validates before atomic replacement. Migration failures retain
-the original and the completed backup. Tests use a synthetic migration only.
+the original and the completed backup. Tests cover both the registered v1
+migration and a synthetic failing migration.
 
 The direct `libc` dependency and test-only `tempfile` dependency are dual
 MIT/Apache-2.0 licensed according to their package manifests. No third-party

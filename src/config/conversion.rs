@@ -1,4 +1,4 @@
-use super::{ConfigV1, Rule, SCHEMA_VERSION};
+use super::{ConfigV1, ConfigV2, Rule, SCHEMA_VERSION, Settings};
 use crate::domain::{
     rule::{Forwarding, Rule as DomainRule, RuleId},
     validation::{ValidationError, validate_rule_set},
@@ -118,7 +118,7 @@ impl From<&DomainRule> for Rule {
 
 impl ConfigV1 {
     pub fn into_domain(self) -> Result<Vec<DomainRule>, super::StoreError> {
-        if self.schema_version != SCHEMA_VERSION {
+        if self.schema_version != 1 {
             return Err(super::StoreError::UnsupportedSchema(self.schema_version));
         }
         let rules = self
@@ -129,12 +129,31 @@ impl ConfigV1 {
         validate_rule_set(&rules).map_err(super::StoreError::InvalidRules)?;
         Ok(rules)
     }
+}
 
-    pub fn from_domain(rules: &[DomainRule]) -> Result<Self, super::StoreError> {
+impl ConfigV2 {
+    pub fn into_domain(self) -> Result<(Vec<DomainRule>, Settings), super::StoreError> {
+        if self.schema_version != SCHEMA_VERSION {
+            return Err(super::StoreError::UnsupportedSchema(self.schema_version));
+        }
+        let rules = self
+            .rules
+            .into_iter()
+            .map(DomainRule::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+        validate_rule_set(&rules).map_err(super::StoreError::InvalidRules)?;
+        Ok((rules, self.settings))
+    }
+
+    pub fn from_domain(
+        rules: &[DomainRule],
+        settings: Settings,
+    ) -> Result<Self, super::StoreError> {
         validate_rule_set(rules).map_err(super::StoreError::InvalidRules)?;
         Ok(Self {
             schema_version: SCHEMA_VERSION,
             rules: rules.iter().map(Rule::from).collect(),
+            settings,
         })
     }
 }

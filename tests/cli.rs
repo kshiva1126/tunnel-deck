@@ -176,6 +176,24 @@ fn local_rule_lifecycle_is_available_across_cli_processes() {
         thread::sleep(Duration::from_millis(20));
     }
 
+    let settings = json_command(
+        root.path(),
+        &[
+            "settings",
+            "set",
+            "--theme",
+            "dark",
+            "--log-level",
+            "debug",
+            "--default-reconnect",
+            "true",
+            "--default-auto-start",
+            "true",
+        ],
+    );
+    assert_eq!(settings["theme"], "dark");
+    assert_eq!(json_command(root.path(), &["settings", "show"]), settings);
+
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let bind_port = listener.local_addr().unwrap().port().to_string();
     drop(listener);
@@ -195,6 +213,9 @@ fn local_rule_lifecycle_is_available_across_cli_processes() {
         ],
     );
     let id = added["rule_id"].as_str().unwrap();
+    let listed = json_command(root.path(), &["forward", "list"]);
+    assert_eq!(listed[0]["auto_start"], true);
+    assert_eq!(listed[0]["reconnect"], true);
     let started = json_command(root.path(), &["forward", "start", "web"]);
     assert_eq!(started["rule_id"], id);
     assert_eq!(started["changed"], true);

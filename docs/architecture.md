@@ -138,6 +138,12 @@ actual OpenSSH process ownership remains in the later forwarding slice.
 Subscriptions receive monotonically numbered events through a 64-event queue;
 a subscriber is removed when its queue fills or its socket disconnects.
 
+The daemon also owns application settings. IPC v1 `settings_get` and
+`settings_update` make the CLI and TUI clients of the same state owner; an
+update persists rules and settings atomically before publishing a
+`settings_changed` event. TOML schema v2 stores settings beside rules, while a
+registered backup-first migration upgrades schema v1 on daemon startup.
+
 ### Implemented OpenSSH process ownership
 
 The daemon starts a private guardian for each requested rule attempt. It passes

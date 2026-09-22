@@ -316,6 +316,11 @@ persistence and UI/CLI settings are tracked in GH-42; connecting the configured
 log level and daemon events to rotation is tracked in GH-43. The parent issue
 remains open until those follow-ups are complete.
 
+GH-42 implements the settings follow-up with TOML schema v2, an explicit
+backup-first v1 migration, daemon-owned IPC get/update operations, CLI JSON and
+human output, and a TUI settings page. Theme and log-level persistence are
+contracts for their consumers; runtime log filtering remains GH-43.
+
 Tasks:
 
 - Add Remote and Dynamic OpenSSH argument construction and controls.

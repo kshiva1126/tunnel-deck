@@ -50,12 +50,52 @@ enum Command {
     },
     /// Show daemon and tunnel status
     Status,
+    /// Inspect or change application settings
+    Settings {
+        #[command(subcommand)]
+        command: SettingsCommand,
+    },
     /// Internal daemon commands
     #[command(hide = true)]
     Daemon {
         #[command(subcommand)]
         command: DaemonCommand,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum SettingsCommand {
+    /// Show persisted application settings
+    Show,
+    /// Replace selected application setting values
+    Set(SettingsArgs),
+}
+
+#[derive(Debug, Args)]
+struct SettingsArgs {
+    #[arg(long, value_enum)]
+    theme: Option<ThemeArg>,
+    #[arg(long, value_enum)]
+    log_level: Option<LogLevelArg>,
+    #[arg(long, value_parser = clap::value_parser!(bool))]
+    default_reconnect: Option<bool>,
+    #[arg(long, value_parser = clap::value_parser!(bool))]
+    default_auto_start: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ThemeArg {
+    System,
+    Dark,
+    Light,
+}
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum LogLevelArg {
+    Error,
+    Warn,
+    Info,
+    Debug,
+    Trace,
 }
 
 #[derive(Debug, Subcommand)]
@@ -110,10 +150,10 @@ struct AddArgs {
     destination_host: String,
     #[arg(long)]
     destination_port: Option<u16>,
-    #[arg(long)]
-    auto_start: bool,
-    #[arg(long)]
-    reconnect: bool,
+    #[arg(long, num_args = 0..=1, default_missing_value = "true", value_parser = clap::value_parser!(bool))]
+    auto_start: Option<bool>,
+    #[arg(long, num_args = 0..=1, default_missing_value = "true", value_parser = clap::value_parser!(bool))]
+    reconnect: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -151,6 +191,8 @@ impl Cli {
                     daemon_call(Operation::ForwardList, serde_json::json!({}), json_output)
                 }
                 ForwardCommand::Add(args) => {
+                    let settings =
+                        daemon_value(Operation::SettingsGet, serde_json::json!({}), json_output)?;
                     let kind = match args.kind {
                         ForwardKind::Local => "local",
                         ForwardKind::Remote => "remote",
@@ -169,8 +211,8 @@ impl Cli {
                         "ssh_host_alias": args.ssh_host_alias,
                         "bind_address": args.bind_address,
                         "bind_port": args.bind_port,
-                        "auto_start": args.auto_start,
-                        "reconnect": args.reconnect,
+                        "auto_start": args.auto_start.unwrap_or_else(|| settings["default_auto_start"].as_bool().unwrap_or(false)),
+                        "reconnect": args.reconnect.unwrap_or_else(|| settings["default_reconnect"].as_bool().unwrap_or(false)),
                     });
                     if !matches!(args.kind, ForwardKind::Dynamic) {
                         payload["destination_host"] = serde_json::json!(args.destination_host);
@@ -192,6 +234,12 @@ impl Cli {
             Some(Command::Status) => {
                 daemon_call(Operation::Status, serde_json::json!({}), json_output)
             }
+            Some(Command::Settings { command }) => match command {
+                SettingsCommand::Show => {
+                    daemon_call(Operation::SettingsGet, serde_json::json!({}), json_output)
+                }
+                SettingsCommand::Set(args) => update_settings(args, json_output),
+            },
             Some(Command::Daemon { command }) => match command {
                 DaemonCommand::Run => run_daemon(),
                 DaemonCommand::Guardian(args) => {
@@ -201,6 +249,33 @@ impl Cli {
             },
         }
     }
+}
+
+fn update_settings(args: SettingsArgs, json_output: bool) -> Result<(), AppError> {
+    let mut settings = daemon_value(Operation::SettingsGet, serde_json::json!({}), json_output)?;
+    if let Some(value) = args.theme {
+        settings["theme"] = serde_json::json!(match value {
+            ThemeArg::System => "system",
+            ThemeArg::Dark => "dark",
+            ThemeArg::Light => "light",
+        });
+    }
+    if let Some(value) = args.log_level {
+        settings["log_level"] = serde_json::json!(match value {
+            LogLevelArg::Error => "error",
+            LogLevelArg::Warn => "warn",
+            LogLevelArg::Info => "info",
+            LogLevelArg::Debug => "debug",
+            LogLevelArg::Trace => "trace",
+        });
+    }
+    if let Some(value) = args.default_reconnect {
+        settings["default_reconnect"] = serde_json::json!(value);
+    }
+    if let Some(value) = args.default_auto_start {
+        settings["default_auto_start"] = serde_json::json!(value);
+    }
+    daemon_call(Operation::SettingsUpdate, settings, json_output)
 }
 
 fn resolved_paths() -> Result<Paths, AppError> {
@@ -242,6 +317,20 @@ fn daemon_call(
     payload: serde_json::Value,
     json_output: bool,
 ) -> Result<(), AppError> {
+    let value = daemon_value(operation, payload, json_output)?;
+    if json_output {
+        println!("{value}");
+    } else {
+        print_human(operation, &value);
+    }
+    Ok(())
+}
+
+fn daemon_value(
+    operation: Operation,
+    payload: serde_json::Value,
+    json_errors: bool,
+) -> Result<serde_json::Value, AppError> {
     let paths = resolved_paths()?;
     let socket = paths
         .socket_path(CURRENT)
@@ -259,17 +348,10 @@ fn daemon_call(
         .and_then(|mut client| client.call(&request))
         .map_err(|error| AppError::Ipc(error.to_string()))?;
     match response {
-        Response::Success(value) => {
-            if json_output {
-                println!("{}", value.result);
-            } else {
-                print_human(operation, &value.result);
-            }
-            Ok(())
-        }
+        Response::Success(value) => Ok(value.result),
         Response::Failure(value) => {
             let error = value.error;
-            if json_output {
+            if json_errors {
                 Err(AppError::JsonDaemon {
                     code: error.code,
                     message: error.message,
@@ -296,6 +378,12 @@ fn print_human(operation: Operation, value: &serde_json::Value) {
                     );
                 }
             }
+        }
+        Operation::SettingsGet | Operation::SettingsUpdate => {
+            println!("theme: {}", value["theme"].as_str().unwrap_or("-"));
+            println!("log-level: {}", value["log_level"].as_str().unwrap_or("-"));
+            println!("default-reconnect: {}", value["default_reconnect"]);
+            println!("default-auto-start: {}", value["default_auto_start"]);
         }
         _ => println!("{value}"),
     }
