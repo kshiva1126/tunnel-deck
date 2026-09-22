@@ -313,6 +313,41 @@ class HookTests(unittest.TestCase):
         self.assertEqual(self.hook("after").returncode, 0)
         self.assertEqual(self.calls(), "")
 
+    def test_admission_change_during_turn_consumes_permit_and_stops_publish(self):
+        for change in ("open_dependency", "fail", "malformed"):
+            with self.subTest(change=change):
+                self.save()
+                self.assertEqual(self.hook("before").returncode, 0)
+                subprocess.run([str(SCRIPTS / "codex.sh")], env=self.env,
+                               check=True, timeout=10)
+                self.assertTrue((self.root / "codex-ran").exists())
+                if change == "open_dependency":
+                    self.config["dependencies"] = [[dependency(22, "open")]]
+                else:
+                    self.config[change] = "dependencies"
+                self.save()
+                # Only effects after the turn matter: workspace preparation
+                # legitimately used Git before the dependency changed.
+                (self.root / "calls").unlink()
+                result = self.hook("after")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse((self.root / "state/GH-24.permit").exists())
+                self.assertTrue((self.root / "state/GH-24.stopped").exists())
+                self.assertNotIn("git ", self.calls())
+                self.assertNotIn("gh pr ", self.calls())
+                calls = self.calls()
+                self.assertEqual(self.hook("after").returncode, 0)
+                (self.root / "codex-ran").unlink()
+                before, after = self.attempt()
+                self.assertNotEqual(before.returncode, 0)
+                self.assertEqual(after.returncode, 0)
+                self.assertFalse((self.root / "codex-ran").exists())
+                self.assertEqual(calls, self.calls())
+                self.assertTrue((self.root / "state/halt").exists())
+                self.clear_stop()
+                self.config.pop(change, None)
+                self.config["dependencies"] = [[]]
+
     def test_hook_launch_failure_latches_and_suppresses_retries(self):
         control = self.root / "synthetic-secret-do-not-log"
         hooks = control / "scripts/symphony"

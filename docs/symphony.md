@@ -215,7 +215,8 @@ the Rust publish checks on a tiny local fixture crate. Cases cover multi-page
 responses, open/closed dependencies, API and schema failures, actual subprocess
 timeout, replay/merge rejection, pre-push rechecking, one-use admission, token
 removal, failed label transitions, durable retry suppression, shutdown on
-redispatch of a stopped issue, manual recovery,
+redispatch of a stopped issue, manual recovery, dependencies becoming open or
+the dependency API failing/returning malformed JSON during an admitted turn,
 and supervisor shutdown. `setpriv` is simulated: those tests verify dispatch
 parity, not native Docker UID isolation. CI runs this harness on both OSes.
 
@@ -299,3 +300,12 @@ non-JSON constants across issue, dependency, and PR responses, with durable
 stops and no external calls on redispatch. Real GitHub E2E, Docker runtime
 isolation, and native macOS remain unverified; their procedures and
 post-publication review requirements above are unchanged.
+
+During-turn revalidation follow-up (2026-09-22): all 27 harness tests and the
+three required Rust checks passed on Linux. The new regression confirms that
+after a successful admission and Codex launch, an open dependency or unusable
+dependency response consumes the permit, persists a stop, and prevents the
+publish hook from running. Repeated after hooks and redispatch make no further
+external calls; redispatch requests worker shutdown. Existing production code
+already satisfies these cases, so this follow-up changes tests and evidence
+only. Native GitHub E2E, Docker runtime isolation, and native macOS were not run.
