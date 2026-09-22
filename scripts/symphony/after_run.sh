@@ -6,6 +6,23 @@ workspace=${1:?workspace path is required}
 control_root=${SYMPHONY_CONTROL_ROOT:?SYMPHONY_CONTROL_ROOT is required}
 . "$control_root/scripts/symphony/common.sh"
 
+trusted_git_read() {
+  if [ "$(id -u)" -eq 0 ] && [ -n "${SYMPHONY_AGENT_UID:-}" ]; then
+    setpriv --reuid="$SYMPHONY_AGENT_UID" --regid="$SYMPHONY_AGENT_GID" --clear-groups \
+      env -u SYMPHONY_GITHUB_TOKEN -u GH_TOKEN -u GITHUB_TOKEN -u SSH_AUTH_SOCK \
+      -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_INDEX_FILE \
+      -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_PREFIX \
+      GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+      git -C "$workspace" "$@"
+  else
+    env -u SYMPHONY_GITHUB_TOKEN -u GH_TOKEN -u GITHUB_TOKEN -u SSH_AUTH_SOCK \
+      -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_INDEX_FILE \
+      -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_PREFIX \
+      GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+      git -C "$workspace" "$@"
+  fi
+}
+
 # Docker keeps durable gate/review state root-owned. Publish as the workspace
 # owner, then return to this trusted parent for review state and GitHub writes.
 if [ "$(id -u)" -eq 0 ] && [ -n "$SYMPHONY_AGENT_UID" ] \
@@ -13,9 +30,7 @@ if [ "$(id -u)" -eq 0 ] && [ -n "$SYMPHONY_AGENT_UID" ] \
     && [ "${SYMPHONY_VALIDATE_ONLY:-0}" != 1 ] \
     && [ "${SYMPHONY_TRUSTED_PUBLISH_ONLY:-0}" != 1 ]; then
   chown -R "$SYMPHONY_AGENT_UID:$SYMPHONY_AGENT_GID" "$workspace"
-  validated_commit=$(env -u SYMPHONY_GITHUB_TOKEN -u GH_TOKEN -u GITHUB_TOKEN \
-    -u SSH_AUTH_SOCK GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
-    git -C "$workspace" -c safe.directory="$workspace" rev-parse HEAD)
+  validated_commit=$(trusted_git_read rev-parse HEAD)
   printf '%s\n' "$validated_commit" | grep -Eq '^[0-9a-f]{40}$' || \
     die "workspace HEAD is invalid before validation"
   set +e
@@ -26,9 +41,7 @@ if [ "$(id -u)" -eq 0 ] && [ -n "$SYMPHONY_AGENT_UID" ] \
   validate_status=$?
   set -e
   [ "$validate_status" -eq 0 ] || exit "$validate_status"
-  after_validation=$(env -u SYMPHONY_GITHUB_TOKEN -u GH_TOKEN -u GITHUB_TOKEN \
-    -u SSH_AUTH_SOCK GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
-    git -C "$workspace" -c safe.directory="$workspace" rev-parse HEAD)
+  after_validation=$(trusted_git_read rev-parse HEAD)
   [ "$after_validation" = "$validated_commit" ] || \
     die "workspace HEAD changed during validation"
 
@@ -69,12 +82,6 @@ if [ "${SYMPHONY_VALIDATE_ONLY:-0}" != 1 ]; then
   require_token
   require_command gh
 fi
-
-trusted_git_read() {
-  env -u SYMPHONY_GITHUB_TOKEN -u GH_TOKEN -u GITHUB_TOKEN -u SSH_AUTH_SOCK \
-    GIT_CONFIG=/dev/null GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
-    git -C "$workspace" -c safe.directory="$workspace" "$@"
-}
 
 agent_command() {
   env -u SYMPHONY_GITHUB_TOKEN -u GH_TOKEN -u GITHUB_TOKEN -u SSH_AUTH_SOCK "$@"
@@ -157,13 +164,18 @@ published_commit=${SYMPHONY_VALIDATED_COMMIT:-$(trusted_git_read rev-parse HEAD)
 failure_status=publish_failed
 trusted_push_dir=$(mktemp -d "${SYMPHONY_STATE_ROOT:?}/trusted-push.XXXXXX")
 chmod 0700 "$trusted_push_dir"
+trusted_bundle="$trusted_push_dir/source.bundle"
+# The trusted shell opens the root-owned destination. Git reads the agent-owned
+# repository as the agent and inherits only that already-open output descriptor.
+trusted_git_read bundle create - "$published_commit" >"$trusted_bundle"
+chmod 0600 "$trusted_bundle"
 env -u SYMPHONY_GITHUB_TOKEN -u GH_TOKEN -u GITHUB_TOKEN -u SSH_AUTH_SOCK \
   GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
   git init --bare "$trusted_push_dir" >/dev/null
 env -u SYMPHONY_GITHUB_TOKEN -u GH_TOKEN -u GITHUB_TOKEN -u SSH_AUTH_SOCK \
   GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
   git -C "$trusted_push_dir" -c protocol.allow=never -c protocol.file.allow=always \
-  fetch --no-tags "$workspace" "$published_commit" >/dev/null
+  fetch --no-tags "$trusted_bundle" "$published_commit" >/dev/null
 [ "$(env -u SYMPHONY_GITHUB_TOKEN -u GH_TOKEN -u GITHUB_TOKEN -u SSH_AUTH_SOCK \
   GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
   git -C "$trusted_push_dir" rev-parse FETCH_HEAD)" = "$published_commit" ] || \
