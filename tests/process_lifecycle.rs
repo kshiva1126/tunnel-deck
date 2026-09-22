@@ -11,6 +11,12 @@ use tunnel_deck::{
 };
 
 fn private_tempdir() -> TempDir {
+    #[cfg(target_os = "macos")]
+    let root = tempfile::Builder::new()
+        .prefix("td-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    #[cfg(not(target_os = "macos"))]
     let root = tempfile::tempdir().unwrap();
     fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
     root
