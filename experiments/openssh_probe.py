@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
-"""Isolated Linux/OpenSSH design probe; no third-party Python dependencies."""
+"""Isolated native OpenSSH probe for Linux and macOS.
 
-import ctypes
+The protocol checks are portable.  Guardian completion is reported through a
+pipe owned by the harness, so the probe does not need Linux subreapers or
+``/proc`` process inspection.
+"""
+
 import fcntl
 import os
 from pathlib import Path
@@ -11,6 +15,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -78,6 +83,9 @@ def probe(root):
     ssh = shutil.which("ssh")
     sshd = shutil.which("sshd")
     require(ssh and sshd and shutil.which("ssh-keygen"), "ssh, sshd, ssh-keygen required")
+    if sys.platform == "darwin":
+        require(Path(ssh).resolve() == Path("/usr/bin/ssh"),
+                "macOS probe must use Apple's /usr/bin/ssh")
     print(run([ssh, "-V"]).stderr.decode().strip(), flush=True)
     for name in ("host", "client"):
         require(run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(root / name)]).returncode == 0,
@@ -200,8 +208,8 @@ def probe(root):
 
 
 def crash_probe(root, master, control, server_port):
-    # Adopt the orphaned guardian for deterministic reaping in this Linux probe.
-    require(ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) == 0, "subreaper setup failed")
+    # The guardian reports completion after reaping SSH.  This explicit IPC is
+    # portable and avoids relying on Linux subreapers or /proc visibility.
     read_fd, write_fd = os.pipe()
     path = root / "guardian.sock"
     daemon = os.fork()
@@ -216,7 +224,6 @@ def crash_probe(root, master, control, server_port):
             child = subprocess.Popen(master(path), start_new_session=True,
                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             os.write(write_fd, f"{os.getpid()} {child.pid}\n".encode())
-            os.close(write_fd)
             lease_guardian.recv(1)
             # Do not poll/reap the leader until all group signaling is finished.
             os.killpg(child.pid, signal.SIGTERM)
@@ -225,6 +232,8 @@ def crash_probe(root, master, control, server_port):
             child.wait(timeout=3)
             lease_guardian.close()
             os.close(lock_fd)
+            os.write(write_fd, b"DONE\n")
+            os.close(write_fd)
             os._exit(0)
         lease_guardian.close()
         os.close(write_fd)
@@ -234,7 +243,7 @@ def crash_probe(root, master, control, server_port):
     guardian = None
     try:
         require(select.select([read_fd], [], [], 5)[0], "guardian startup timed out")
-        guardian, ssh_pid = map(int, os.read(read_fd, 128).split())
+        guardian, _ssh_pid = map(int, os.read(read_fd, 128).split())
         wait_for(lambda: control(path, "check").returncode == 0, "guardian master not ready")
         number = port()
         require(control(path, "forward", "-L", f"127.0.0.1:{number}:127.0.0.1:{server_port}").returncode == 0,
@@ -260,20 +269,19 @@ def crash_probe(root, master, control, server_port):
 
             wait_for(unlocked, "guardian did not release lock after cleanup")
             require(not listening(number), "listener survived guardian cleanup")
-            require(not Path(f"/proc/{ssh_pid}").exists(), "SSH process survived cleanup")
-        _, status = os.waitpid(guardian, 0)
+            require(select.select([read_fd], [], [], 5)[0], "guardian completion timed out")
+            require(os.read(read_fd, 128) == b"DONE\n", "invalid guardian completion")
         guardian = None
-        require(status == 0, "guardian exited unsuccessfully")
         print("PASS: daemon SIGKILL -> guardian EOF -> SSH reaped, listener closed, lock released", flush=True)
     finally:
-        os.close(read_fd)
         if daemon is not None:
             os.kill(daemon, signal.SIGKILL)
             os.waitpid(daemon, 0)
         if guardian is not None:
-            # EOF cleanup is bounded; avoid indefinite waits on probe failure.
-            wait_for(lambda: os.waitpid(guardian, os.WNOHANG)[0] == guardian,
-                     "guardian cleanup timeout", seconds=8)
+            # The daemon owns the guardian. After daemon SIGKILL it is orphaned,
+            # so completion is observed through the pipe instead of waitpid.
+            select.select([read_fd], [], [], 8)
+        os.close(read_fd)
 
 
 if __name__ == "__main__":
