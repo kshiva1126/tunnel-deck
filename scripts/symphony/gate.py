@@ -10,6 +10,7 @@ import sys
 
 REPO = "kshiva1126/tunnel-deck"
 API_TIMEOUT = 30
+MAX_JSON_NESTING = 100
 
 
 class Refused(Exception):
@@ -31,6 +32,31 @@ def reject_constant(_value):
     raise ValueError()
 
 
+def reject_excessive_json_nesting(document):
+    """Reject deeply nested JSON without relying on Python's recursion limit."""
+    depth = 0
+    in_string = False
+    escaped = False
+    for character in document:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+        elif character == '"':
+            in_string = True
+        elif character in "[{":
+            depth += 1
+            if depth > MAX_JSON_NESTING:
+                raise ValueError()
+        elif character in "]}":
+            depth -= 1
+            if depth < 0:
+                raise ValueError()
+
+
 def api(endpoint, method="GET", body=None):
     env = os.environ.copy()
     token = env.get("SYMPHONY_GITHUB_TOKEN")
@@ -50,6 +76,7 @@ def api(endpoint, method="GET", body=None):
                                 text=True, timeout=API_TIMEOUT, check=True)
         if method != "GET":
             return None
+        reject_excessive_json_nesting(result.stdout)
         pages = json.loads(result.stdout, object_pairs_hook=unique_object,
                            parse_constant=reject_constant)
         if not isinstance(pages, list) or not pages:

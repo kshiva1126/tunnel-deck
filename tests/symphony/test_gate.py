@@ -99,6 +99,20 @@ def dependency(number, state):
             "repository_url": "https://api.github.com/repos/kshiva1126/tunnel-deck"}
 
 
+class JsonNestingTests(unittest.TestCase):
+    def test_limit_ignores_brackets_inside_strings(self):
+        gate.reject_excessive_json_nesting(
+            json.dumps({"body": "[" * 200 + '\\"' + "]" * 200})
+        )
+
+    def test_limit_rejects_the_first_level_above_the_boundary(self):
+        allowed = "[" * gate.MAX_JSON_NESTING + "0" + "]" * gate.MAX_JSON_NESTING
+        gate.reject_excessive_json_nesting(allowed)
+        refused = "[" + allowed + "]"
+        with self.assertRaises(ValueError):
+            gate.reject_excessive_json_nesting(refused)
+
+
 class HookTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

@@ -116,9 +116,10 @@ also covers missing or empty `SYMPHONY_GITHUB_TOKEN`: the gate never falls back
 to `GH_TOKEN`, `GITHUB_TOKEN`, or CLI-stored credentials. It persists a stop and
 requests worker shutdown because it cannot remove `agent-ready` without the
 trusted credential. Restore that credential before following recovery below.
-Response validation
-includes JSON nesting beyond the decoder's limit: this also persists a stop
-record so a malformed response cannot cause repeated API calls on retries.
+Response validation enforces a fixed 100-level JSON nesting limit before
+decoding, independently of the Python runtime's recursion limit. Exceeding it
+persists a stop record so a malformed response cannot cause repeated API calls
+on retries.
 Duplicate JSON object fields are also rejected rather than accepting the last
 value: conflicting issue or dependency states must never silently permit a run.
 Non-JSON constants (`NaN`, `Infinity`, and `-Infinity`) are rejected even in
@@ -360,3 +361,11 @@ calls. Existing production code satisfies these cases; this follow-up adds
 tests and recovery clarification. Native GitHub E2E, Docker runtime isolation,
 and native macOS were not run; remote CI remains a post-publication review
 condition.
+
+Cross-version JSON-depth verification (2026-09-22): all 32 harness tests and
+the three required Rust checks passed on Linux, Python 3.11.2 / Rust 1.85.0.
+The fixed pre-decode limit removes reliance on Python's changing decoder
+recursion behavior; boundary coverage also verifies that brackets inside JSON
+strings do not count as nesting. Native GitHub E2E and Docker runtime isolation
+were not rerun. The prior remote Linux/macOS jobs exposed this portability gap;
+replacement jobs are required before merge.
