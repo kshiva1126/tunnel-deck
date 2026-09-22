@@ -124,6 +124,9 @@ fn execute_host(command: HostCommand) -> Result<(), AppError> {
     match command {
         HostCommand::List => {
             let discovery = catalog.refresh()?;
+            for warning in &discovery.warnings {
+                eprintln!("warning: {:?} {}", warning.kind, warning.path.display());
+            }
             for alias in discovery.aliases {
                 println!("{alias}");
             }

@@ -30,6 +30,23 @@ fn host_list_uses_an_isolated_ssh_fixture() {
         String::from_utf8(output.stdout).expect("UTF-8 aliases"),
         "api\ndb\nweb\n"
     );
+    let stderr = String::from_utf8(output.stderr).expect("UTF-8 warnings");
+    assert!(stderr.contains("warning: Missing"));
+    assert!(stderr.contains("missing.conf"));
+}
+
+#[test]
+fn invalid_host_alias_is_a_usage_error() {
+    let output = tdeck()
+        .args(["host", "show", "not an alias"])
+        .output()
+        .expect("reject invalid SSH alias");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8(output.stderr)
+            .expect("UTF-8 error")
+            .contains("SSH host alias is invalid")
+    );
 }
 
 #[test]

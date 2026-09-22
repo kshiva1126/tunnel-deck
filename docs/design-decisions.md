@@ -249,16 +249,17 @@ hosts; exceeding a traversal bound fails the refresh rather than returning a
 silently incomplete catalog.
 
 OpenSSH remains the settings and authentication authority. Details come from
-bounded `ssh -G -- <alias>` output. Connection tests directly execute a bounded
-`ssh -T -n` process with `BatchMode=yes`, `ClearAllForwardings=yes`, a ten-second
-OpenSSH connect timeout, and one connection attempt. They preserve the alias and
-do not override identity, agent, proxy, or host-key policy. Timeout cleanup kills
-the dedicated process group, including a configured proxy helper. Diagnostics
-are fixed, classified messages; captured OpenSSH output is bounded and never
-returned or logged, avoiding disclosure of user names, paths, endpoints, or
-remote banners. Unknown and changed keys intentionally share one host-key
-verification category because locale-independent stderr cannot safely
-distinguish every OpenSSH version.
+bounded `ssh -F <selected-config> -G -- <alias>` output. Connection tests
+directly execute a bounded `ssh -F <selected-config> -T -n` process with
+`BatchMode=yes`, `ClearAllForwardings=yes`, a ten-second OpenSSH connect timeout,
+and one connection attempt. Thus discovery, details, and connection tests use
+the same selected config. They preserve the alias and do not override identity,
+agent, proxy, or host-key policy. Timeout cleanup kills the dedicated process
+group, including a configured proxy helper. Diagnostics are fixed, classified
+messages; captured OpenSSH output is bounded and never returned or logged,
+avoiding disclosure of user names, paths, endpoints, or remote banners. Unknown
+and changed keys intentionally share one host-key verification category because
+locale-independent stderr cannot safely distinguish every OpenSSH version.
 
 The `glob` dependency is used only for OpenSSH-style Include path expansion.
 Its package metadata declares MIT OR Apache-2.0, and no source or assets were
@@ -266,7 +267,7 @@ copied.
 
 GH-3 local verification (2026-09-22): Linux x86_64, Rust 1.85.0;
 `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`,
-and `cargo test --all-features` pass (53 unit tests, 4 CLI tests, doc-tests).
+and `cargo test --all-features` pass (54 unit tests, 5 CLI tests, doc-tests).
 Tests use an SSH config fixture and fake SSH executable; no personal config,
 network account, or live server was used. Native macOS and remote CI remain
 post-publication review conditions.

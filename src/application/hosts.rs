@@ -131,6 +131,8 @@ impl HostCatalog {
         let output = run_bounded(
             &self.ssh_executable,
             [
+                OsStr::new("-F"),
+                self.config_path.as_os_str(),
                 OsStr::new("-G"),
                 OsStr::new("--"),
                 OsStr::new(alias.as_str()),
@@ -163,11 +165,10 @@ impl HostCatalog {
             alias.as_str(),
             "true",
         ];
-        let output = run_bounded(
-            &self.ssh_executable,
-            args.iter().map(OsStr::new),
-            CONNECTION_TIMEOUT,
-        )?;
+        let args = std::iter::once(OsStr::new("-F"))
+            .chain(std::iter::once(self.config_path.as_os_str()))
+            .chain(args.iter().map(OsStr::new));
+        let output = run_bounded(&self.ssh_executable, args, CONNECTION_TIMEOUT)?;
         if output.timed_out {
             return Ok(ConnectionOutcome::TimedOut);
         }
@@ -568,14 +569,17 @@ mod tests {
     }
 
     #[test]
-    fn fake_openssh_covers_details_success_authentication_and_host_key_failure() {
+    fn fake_openssh_uses_selected_config_and_covers_connection_outcomes() {
         let (_directory, ssh) = fake_ssh(
             r#"#!/bin/sh
-if [ "$1" = "-G" ]; then
+if [ "$1" != "-F" ] || [ "$2" != "/fixture/config" ]; then
+  exit 64
+fi
+if [ "$3" = "-G" ]; then
   printf 'hostname fixture.example\nuser fixture\nport 22\nidentityfile /fixture/key\nproxyjump none\nproxycommand none\n'
   exit 0
 fi
-case "${12}" in
+case "${14}" in
   success) exit 0 ;;
   auth) printf 'Permission denied (publickey). secret-marker\n' >&2; exit 255 ;;
   unknown-key) printf 'Host key verification failed. secret-marker\n' >&2; exit 255 ;;
@@ -583,7 +587,7 @@ esac
 exit 1
 "#,
         );
-        let catalog = HostCatalog::new("unused", "unused", ssh);
+        let catalog = HostCatalog::new("/fixture/config", "unused", ssh);
         assert_eq!(
             catalog.effective("details").unwrap().hostname,
             "fixture.example"
