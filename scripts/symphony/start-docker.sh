@@ -79,6 +79,7 @@ container_id=$(docker run --detach --rm --init \
   --read-only \
   --cap-drop ALL \
   --cap-add CHOWN \
+  --cap-add DAC_OVERRIDE \
   --cap-add SETUID \
   --cap-add SETGID \
   --security-opt no-new-privileges \
