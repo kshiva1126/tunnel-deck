@@ -85,6 +85,81 @@ Review the diff, CI, and acceptance criteria before merging. The generated pull
 request uses `Refs #N`, so merge does not automatically close an issue whose
 full acceptance criteria still need manual confirmation.
 
+## Codex model selection (GH-25)
+
+`WORKFLOW.md`'s `codex.command` invokes the trusted
+[`scripts/symphony/codex.sh`](../scripts/symphony/codex.sh) in both launch modes.
+That script is the single model setting and starts:
+
+```sh
+codex app-server -c 'model="gpt-5.6-sol"'
+```
+
+The explicit CLI configuration overrides a configured or recommended model;
+see the [OpenAI configuration documentation](https://developers.openai.com/codex/config-advanced/).
+We choose Sol for the quality/usage balance of this workflow, rather than
+following future recommendation changes. No `model_reasoning_effort` override
+is added: without an explicit user configuration, Sol uses its model default.
+Host installations still honor an explicitly configured reasoning effort.
+The Docker launcher copies only Codex authentication, not the host config.
+GitHub credential removal and Docker's UID/GID drop remain unchanged.
+
+To change the model later, edit the argument in the **trusted control
+checkout's** `scripts/symphony/codex.sh`, update the harness expectation and
+this section, then restart the worker for new sessions. Editing an issue
+workspace does not change the running worker's `/control` checkout. Existing
+sessions are not evidence that the updated launcher has taken effect.
+
+After a new Symphony turn, safely verify its Codex rollout record with the
+following command, replacing the path with that session's JSONL file under
+`$CODEX_HOME/sessions` (or `~/.codex/sessions`). In Docker, run the check inside
+the running container before stopping it: the Codex home is temporary.
+The check prints only a fixed success/failure message, never the session
+contents, prompt, environment, or credentials. Do not attach full session or
+configuration dumps to verification evidence.
+
+```sh
+python3 - /path/to/new-session.jsonl <<'PY'
+import json
+import sys
+
+try:
+    models = []
+    with open(sys.argv[1]) as session:
+        for line in session:
+            event = json.loads(line)
+            if event.get("type") == "turn_context":
+                models.append(event["payload"].get("model"))
+    valid = bool(models) and all(model == "gpt-5.6-sol" for model in models)
+except (OSError, ValueError, KeyError, TypeError, AttributeError):
+    valid = False
+print("Verified session model: gpt-5.6-sol" if valid else "Session model not verified")
+sys.exit(0 if valid else 1)
+PY
+```
+
+Record the session identifier, Codex version, launch mode, and check result.
+The offline harness executes `WORKFLOW.md`'s actual command in host and
+simulated Docker modes, checking the exact model argument, absence of a
+reasoning override, and removal of all four sensitive environment variables.
+This verifies command forwarding, not live model availability or a real
+Symphony session; the new-session check above supplies that separate evidence.
+
+GH-25 local verification (2026-09-22): on Linux, all 33 harness tests and
+`cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`,
+and `cargo test --all-features` passed (47 unit tests and 3 CLI tests).
+The new command test first failed in both modes without the model argument,
+then passed with it. The actual configured command also started Codex 0.155.1;
+its `config/read` response confirmed `model = "gpt-5.6-sol"`. Only that model
+confirmation was printed; no inference turn or GitHub operation was requested.
+Shell syntax and diff whitespace checks passed.
+
+Deployment acceptance evidence must come from a new **Symphony-dispatched**
+session using the updated trusted control checkout. Record that evidence on
+GH-25 after merging and restarting the worker; a run from the issue workspace
+itself still uses the pre-change control checkout. Native Docker isolation and
+macOS are covered by the remote Linux/macOS checks after publication.
+
 ## Dependency admission and replay protection (GH-24)
 
 Both launchers now require Python 3.9+ (included in the Docker image) and use

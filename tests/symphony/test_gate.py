@@ -6,6 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -84,7 +85,7 @@ elif name == "git":
     elif command[:1] == ["diff"]: print("fixture change")
     elif command[:1] not in (["status"], ["rev-parse"], ["push"]): sys.exit(4)
 elif name == "codex":
-    assert args == ["app-server"]
+    assert args == ["app-server", "-c", 'model="gpt-5.6-sol"']
     assert all(k not in os.environ for k in ("SYMPHONY_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN", "SSH_AUTH_SOCK"))
     (root / "codex-ran").touch()
 elif name == "setpriv":
@@ -181,6 +182,30 @@ class HookTests(unittest.TestCase):
         # Operator recovery happens only while the worker is stopped.
         (self.root / "state/GH-24.stopped").unlink()
         (self.root / "state/halt").unlink(missing_ok=True)
+
+    def test_workflow_pins_model_without_reasoning_override_in_both_modes(self):
+        # Execute the configured command, including its shell quoting, instead
+        # of duplicating the launcher invocation in the test.
+        frontmatter = (ROOT / "WORKFLOW.md").read_text().split("---", 2)[1]
+        codex_section = frontmatter.split("\ncodex:\n", 1)[1]
+        command_line = next(line for line in codex_section.splitlines()
+                            if line.startswith("  command: "))
+        command, = shlex.split(command_line.split(": ", 1)[1])
+        for docker in (False, True):
+            with self.subTest(docker=docker):
+                if docker:
+                    self.env.update(SYMPHONY_AGENT_UID=str(os.getuid()),
+                                    SYMPHONY_AGENT_GID=str(os.getgid()))
+                result = subprocess.run(["sh", "-c", command], env=self.env,
+                                        text=True, capture_output=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "", "stdout belongs to App Server RPC")
+                self.assertNotIn("synthetic-secret", result.stderr)
+                self.assertTrue((self.root / "codex-ran").exists())
+                self.assertIn('codex app-server -c model="gpt-5.6-sol"\n', self.calls())
+                self.assertEqual("setpriv --reuid=" in self.calls(), docker)
+                (self.root / "codex-ran").unlink()
+                (self.root / "calls").unlink()
 
     def test_no_dependencies_runs_and_publishes(self):
         before, after = self.attempt()
