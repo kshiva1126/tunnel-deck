@@ -34,6 +34,14 @@ if name == "gh":
         if "dependencies/" in endpoint: kind = "dependencies"
         elif "/pulls?" in endpoint: kind = "prs"
         elif "/labels" in endpoint: kind = "labels"
+        # Change GitHub only at the final pre-push query, after both admission
+        # checks succeeded and the publish hook completed its Rust checks.
+        change = config.get("pre_push_change")
+        if change and method == "GET" and kind == change["kind"]:
+            count = sum("--method GET " in line and endpoint in line
+                        for line in (root / "calls").read_text().splitlines())
+            if count == 3:
+                config.update(change["response"])
         if config.get("hang") == kind:
             import time
             time.sleep(5)
@@ -476,6 +484,49 @@ class HookTests(unittest.TestCase):
         self.save()
         self.assert_blocked()
         self.assertNotIn("setpriv", self.calls())
+
+    def test_pre_push_change_latches_without_remote_publication_in_both_modes(self):
+        changes = (
+            ("dependencies", {"dependencies": [[dependency(22, "open")]]}),
+            ("dependencies", {"fail": "dependencies"}),
+            ("dependencies", {"malformed": "dependencies"}),
+            ("prs", {"prs": [[{"number": 99, "state": "closed",
+                                 "merged_at": "2026-09-22T00:00:00Z"}]]}),
+        )
+        for docker in (False, True):
+            for kind, response in changes:
+                with self.subTest(docker=docker, response=response):
+                    if docker:
+                        self.env.update(SYMPHONY_AGENT_UID=str(os.getuid()),
+                                        SYMPHONY_AGENT_GID=str(os.getgid()))
+                    self.config["pre_push_change"] = {"kind": kind, "response": response}
+                    self.save()
+                    before, after = self.attempt()
+                    self.assertEqual(before.returncode, 0, before.stderr)
+                    self.assertTrue((self.root / "codex-ran").exists())
+                    self.assertNotEqual(after.returncode, 0)
+                    # The real publish hook reached validation and its final
+                    # gate; the earlier after admission did not reject it.
+                    self.assertIn("rev-list --count", self.calls())
+                    self.assertEqual(sum("--method GET " in line and
+                                         ("/dependencies/" if kind == "dependencies" else "/pulls?") in line
+                                         for line in self.calls().splitlines()), 3)
+                    self.assertNotIn("push --set-upstream", self.calls())
+                    self.assertNotIn("gh pr ", self.calls())
+                    self.assertFalse((self.root / "state/GH-24.permit").exists())
+                    self.assertTrue((self.root / "state/GH-24.stopped").exists())
+                    calls = self.calls()
+                    (self.root / "codex-ran").unlink()
+                    self.assertEqual(self.hook("after").returncode, 0)
+                    for _ in range(2):
+                        before, after = self.attempt()
+                        self.assertNotEqual(before.returncode, 0)
+                        self.assertEqual(after.returncode, 0)
+                    self.assertFalse((self.root / "codex-ran").exists())
+                    self.assertEqual(calls, self.calls())
+                    self.assertTrue((self.root / "state/halt").exists())
+                    self.clear_stop()
+                    (self.root / "calls").unlink()
 
     def test_timeout_latches_and_skips_publish(self):
         self.config["hang"] = "dependencies"

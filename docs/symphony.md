@@ -334,3 +334,14 @@ continues through Codex launch, the real publish hook with fake Git/GitHub,
 permit consumption, and replay suppression in both command modes. Production
 behavior is unchanged. Native GitHub E2E, Docker isolation, and macOS were not
 run; remote CI remains a human-review condition after publication.
+
+Pre-push revalidation verification (2026-09-22): all 29 harness tests and the
+three required Rust checks passed on Linux. New coverage changes the fake API
+response only on the final pre-push query, after before/after admission and the
+publish hook's Rust checks. An open dependency, dependency API error, malformed
+JSON, or merged branch PR prevents push and PR creation in host and simulated
+Docker modes. The after gate consumes the permit and persists a stop; repeated
+hooks neither launch Codex nor make external calls, and redispatch requests
+worker shutdown. Existing production behavior is unchanged. Native GitHub E2E,
+Docker runtime isolation, and native macOS were not run; remote CI remains a
+post-publication human-review condition.
