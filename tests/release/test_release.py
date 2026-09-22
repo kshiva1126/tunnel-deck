@@ -161,6 +161,18 @@ class ReleasePackagingTest(unittest.TestCase):
                 smoke.run_checks(Path("tdeck"), "0.1.0")
         self.assertEqual(smoke.COMMAND_TIMEOUT_SECONDS, run.call_args.kwargs["timeout"])
 
+    def test_native_smoke_malformed_archive_name_cleans_sidecars(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            metadata_path = root / "release.json"
+            checksum_path = root / "release.sha256"
+            metadata_path.write_text(json.dumps({"archive": ""}))
+            checksum_path.write_text("invalid checksum\n")
+            with self.assertRaisesRegex(RuntimeError, "safe archive name"):
+                smoke.smoke(metadata_path)
+            self.assertFalse(metadata_path.exists())
+            self.assertFalse(checksum_path.exists())
+
     def test_third_party_notices_match_locked_release_dependencies(self):
         from scripts.licenses import generate
 

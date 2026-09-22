@@ -108,12 +108,18 @@ def smoke(metadata_path: Path) -> None:
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     target = metadata.get("target")
     archive_name = metadata.get("archive")
-    if not isinstance(archive_name, str) or Path(archive_name).name != archive_name:
-        raise RuntimeError("metadata does not contain a safe archive name")
-    archive_path = metadata_path.with_name(archive_name)
     checksum_path = metadata_path.with_suffix(".sha256")
-    stem = archive_path.name.removesuffix(".tar.gz")
+    cleanup_paths = [metadata_path, checksum_path]
     try:
+        if (
+            not isinstance(archive_name, str)
+            or not archive_name
+            or Path(archive_name).name != archive_name
+        ):
+            raise RuntimeError("metadata does not contain a safe archive name")
+        archive_path = metadata_path.with_name(archive_name)
+        cleanup_paths.append(archive_path)
+        stem = archive_path.name.removesuffix(".tar.gz")
         if target not in TARGET_RUNNERS:
             raise RuntimeError(f"unsupported smoke target: {target}")
         actual_runner = runner_identity()
@@ -165,7 +171,7 @@ def smoke(metadata_path: Path) -> None:
                 raise RuntimeError("final archive and sidecar metadata differ")
             run_checks(binary, metadata["version"])
     except BaseException:
-        for path in (archive_path, metadata_path, checksum_path):
+        for path in cleanup_paths:
             try:
                 path.unlink()
             except FileNotFoundError:
