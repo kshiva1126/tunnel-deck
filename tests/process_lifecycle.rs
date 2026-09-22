@@ -8,7 +8,12 @@ use tempfile::TempDir;
 use tunnel_deck::{
     daemon::process::{self, MAX_STDERR_BYTES},
     domain::rule::{Rule, RuleId},
+    logging::RotatingLog,
 };
+
+fn test_log(root: &Path) -> RotatingLog {
+    RotatingLog::open(&root.join("tunnel-deck.log"), 1024 * 1024, 3).unwrap()
+}
 
 fn private_tempdir() -> TempDir {
     #[cfg(target_os = "macos")]
@@ -74,6 +79,7 @@ fn stop_during_start_discards_the_late_forwarding_success() {
             PathBuf::from(env!("CARGO_BIN_EXE_tdeck")),
             ssh,
             lock(root.path()),
+            test_log(root.path()),
         )
         .unwrap(),
     );
@@ -112,6 +118,69 @@ fn stop_during_start_discards_the_late_forwarding_success() {
 }
 
 #[test]
+fn stop_during_failed_start_does_not_record_a_spurious_failure() {
+    use serde_json::json;
+    use std::{sync::Arc, thread};
+    use tunnel_deck::{
+        config::ConfigStore,
+        daemon::{lifecycle::RequestHandler, manager::DaemonManager},
+        ipc::{Operation, Request, Response},
+    };
+
+    let root = private_tempdir();
+    let config = root.path().join("config");
+    fs::create_dir(&config).unwrap();
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o700)).unwrap();
+    let managed_rule = rule();
+    ConfigStore::open(&config)
+        .unwrap()
+        .save(std::slice::from_ref(&managed_rule))
+        .unwrap();
+    let (ssh, _) = fake_ssh_with_check(root.path(), "exit 1", "sleep 1; exit 1");
+    let manager = Arc::new(
+        DaemonManager::open_managed(
+            &config,
+            root.path().to_owned(),
+            PathBuf::from(env!("CARGO_BIN_EXE_tdeck")),
+            ssh,
+            lock(root.path()),
+            test_log(root.path()),
+        )
+        .unwrap(),
+    );
+    let id = managed_rule.id().as_uuid();
+    let request = move |operation| Request::new(operation, json!({"rule_id": id}));
+    let starter = {
+        let manager = Arc::clone(&manager);
+        thread::spawn(move || manager.handle(&request(Operation::ForwardStart)))
+    };
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !fs::read_dir(root.path()).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("attempt-")
+    }) {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    assert!(matches!(
+        manager.handle(&request(Operation::ForwardStop)),
+        Response::Success(value) if value.result["changed"] == true
+    ));
+    assert!(matches!(
+        starter.join().unwrap(),
+        Response::Success(value) if value.result["start_requested"] == false
+    ));
+    let logged = fs::read_to_string(root.path().join("tunnel-deck.log")).unwrap();
+    assert!(logged.contains("event=rule_stopped"));
+    assert!(!logged.contains("event=rule_failed"));
+    assert!(!logged.contains("diagnostic="));
+}
+
+#[test]
 fn status_remains_available_while_stop_waits_for_guardian_cleanup() {
     use serde_json::json;
     use std::{sync::Arc, thread};
@@ -138,6 +207,7 @@ fn status_remains_available_while_stop_waits_for_guardian_cleanup() {
             PathBuf::from(env!("CARGO_BIN_EXE_tdeck")),
             ssh,
             lock(root.path()),
+            test_log(root.path()),
         )
         .unwrap(),
     );
@@ -325,4 +395,119 @@ fn early_master_failure_is_reported_and_attempt_directory_is_removed() {
             .to_string_lossy()
             .starts_with("attempt-")
     }));
+}
+
+#[test]
+fn daemon_failure_log_matches_status_and_redacts_raw_stderr() {
+    use serde_json::json;
+    use tunnel_deck::{
+        config::ConfigStore,
+        daemon::{lifecycle::RequestHandler, manager::DaemonManager},
+        ipc::{Operation, Request, Response},
+    };
+
+    let root = private_tempdir();
+    let config = root.path().join("config");
+    fs::create_dir(&config).unwrap();
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o700)).unwrap();
+    let managed_rule = rule();
+    ConfigStore::open(&config)
+        .unwrap()
+        .save(std::slice::from_ref(&managed_rule))
+        .unwrap();
+    let secret = "synthetic-credential-must-not-be-logged";
+    let (ssh, _) = fake_ssh(
+        root.path(),
+        &format!("printf 'Permission denied {secret}' >&2; exit 23"),
+    );
+    let log_path = root.path().join("tunnel-deck.log");
+    let manager = DaemonManager::open_managed(
+        &config,
+        root.path().to_owned(),
+        PathBuf::from(env!("CARGO_BIN_EXE_tdeck")),
+        ssh,
+        lock(root.path()),
+        test_log(root.path()),
+    )
+    .unwrap();
+    let id = managed_rule.id().as_uuid();
+    let response = manager.handle(&Request::new(
+        Operation::ForwardStart,
+        json!({"rule_id": id}),
+    ));
+    let displayed = match response {
+        Response::Failure(value) => value.error.message,
+        Response::Success(_) => panic!("failure unexpectedly became active"),
+    };
+    let status = manager.handle(&Request::new(Operation::Status, json!({})));
+    let status = match status {
+        Response::Success(value) => value.result,
+        Response::Failure(_) => panic!("status failed"),
+    };
+    assert_eq!(status["forwards"][0]["error_kind"], "authentication");
+    assert_eq!(status["forwards"][0]["last_error"], displayed);
+    let logged = fs::read_to_string(log_path).unwrap();
+    assert!(logged.contains("event=rule_failed"));
+    assert!(logged.contains("diagnostic_kind=authentication"));
+    assert!(logged.contains(&format!("diagnostic={displayed}")));
+    assert!(!logged.contains(secret));
+    assert!(!logged.to_ascii_lowercase().contains("permission denied"));
+}
+
+#[test]
+fn retryable_failure_records_reconnect_with_the_same_classification() {
+    use serde_json::json;
+    use tunnel_deck::{
+        config::ConfigStore,
+        daemon::{lifecycle::RequestHandler, manager::DaemonManager},
+        ipc::{Operation, Request, Response},
+    };
+
+    let root = private_tempdir();
+    let config = root.path().join("config");
+    fs::create_dir(&config).unwrap();
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o700)).unwrap();
+    let managed_rule = rule().with_policy(false, true);
+    ConfigStore::open(&config)
+        .unwrap()
+        .save(std::slice::from_ref(&managed_rule))
+        .unwrap();
+    let (ssh, _) = fake_ssh(
+        root.path(),
+        "printf 'Connection refused hidden-environment-value' >&2; exit 23",
+    );
+    let manager = DaemonManager::open_managed(
+        &config,
+        root.path().to_owned(),
+        PathBuf::from(env!("CARGO_BIN_EXE_tdeck")),
+        ssh,
+        lock(root.path()),
+        test_log(root.path()),
+    )
+    .unwrap();
+    let events = manager.subscribe().unwrap();
+    let id = managed_rule.id().as_uuid();
+    assert!(matches!(
+        manager.handle(&Request::new(
+            Operation::ForwardStart,
+            json!({"rule_id": id})
+        )),
+        Response::Failure(_)
+    ));
+    let status = match manager.handle(&Request::new(Operation::Status, json!({}))) {
+        Response::Success(value) => value.result,
+        Response::Failure(_) => panic!("status failed"),
+    };
+    assert_eq!(status["forwards"][0]["state"], "reconnecting");
+    assert_eq!(status["forwards"][0]["error_kind"], "network");
+    let reconnect = events
+        .try_iter()
+        .find(|event| event.event == "rule_reconnecting")
+        .expect("reconnect event");
+    assert_eq!(reconnect.payload["rule_id"], id.to_string());
+    let logged = fs::read_to_string(root.path().join("tunnel-deck.log")).unwrap();
+    assert!(logged.contains("event=rule_reconnecting"));
+    assert!(logged.contains("diagnostic_kind=network"));
+    assert!(logged.contains("diagnostic=the SSH network connection failed"));
+    assert!(!logged.contains("hidden-environment-value"));
 }

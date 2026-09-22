@@ -417,8 +417,21 @@ exit of a previously active attempt is likewise not asserted to be a network
 failure. Runtime status exposes uptime, reconnect count, and the last redacted
 diagnostic for the TUI and CLI.
 
-The bounded rotating-log primitive is deliberately not connected to runtime
-events until the settings contract defines its level. Application settings
-need an explicit versioned persistence and IPC decision; that work is tracked
-in GH-42, with log integration in GH-43. The existing TOML v1 and IPC v1 shapes
-are unchanged by this runtime slice.
+The daemon writes rule start, classified failure, reconnect, and stop events to
+the bounded rotating log. It reads the daemon-owned current setting for every
+record, so a persisted `log_level` update takes effect without restarting;
+failures use `error` and lifecycle events use `info`. Log records contain only
+rule IDs and application-owned fixed diagnostic classifications/messages, never
+captured OpenSSH stderr, rule connection fields, credentials, or environment
+values. CLI and TUI diagnostics continue to read the same `RuntimeInfo` message
+used to form failure/reconnect records.
+
+The log directory and every active/rotation file must remain private regular
+objects owned by the current user; symlinks, hardlinks, wrong modes, and unsafe
+rotation slots reject startup or the affected record. The logger retains the
+validated private-directory descriptor and performs append, removal, and
+rotation with descriptor-relative operations, so replacing a parent path cannot
+redirect log output. A process-local writer lock serializes size checking,
+rotation, and append. Rotation keeps three 1 MiB generations, and logging
+failure remains observational: it cannot roll back an already completed tunnel
+transition. GH-42's TOML v2 and IPC v1 settings shapes are unchanged.

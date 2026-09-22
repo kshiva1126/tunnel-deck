@@ -1,12 +1,15 @@
 //! Unix filesystem operations shared by Linux and macOS. Operations within an
 //! application directory use its open descriptor, never a re-resolved pathname.
 use std::{
-    ffi::CString,
+    ffi::{CString, OsStr},
     fs::{self, File, OpenOptions},
     io,
     os::{
         fd::{AsRawFd, FromRawFd},
-        unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
+        unix::{
+            ffi::OsStrExt,
+            fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
+        },
     },
     path::{Path, PathBuf},
 };
@@ -66,14 +69,14 @@ impl PrivateDirectory {
         Ok(Self { file, uid })
     }
 
-    pub fn read(&self, name: &str) -> io::Result<File> {
+    pub fn read(&self, name: impl AsRef<OsStr>) -> io::Result<File> {
         let file = self.open_file(name, libc::O_RDONLY | libc::O_NONBLOCK, 0)?;
         check(&file.metadata()?, self.uid, false)?;
         Ok(file)
     }
 
-    pub fn create(&self, name: &str) -> io::Result<File> {
-        let file = self.open_file(name, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL, 0o600)?;
+    pub fn create(&self, name: impl AsRef<OsStr>) -> io::Result<File> {
+        let file = self.open_file(&name, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL, 0o600)?;
         if let Err(error) = check(&file.metadata()?, self.uid, false) {
             let _ = self.remove(name);
             return Err(error);
@@ -81,7 +84,18 @@ impl PrivateDirectory {
         Ok(file)
     }
 
-    fn open_file(&self, name: &str, flags: i32, mode: libc::mode_t) -> io::Result<File> {
+    pub fn append(&self, name: impl AsRef<OsStr>) -> io::Result<File> {
+        let file = self.open_file(name, libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND, 0o600)?;
+        check(&file.metadata()?, self.uid, false)?;
+        Ok(file)
+    }
+
+    fn open_file(
+        &self,
+        name: impl AsRef<OsStr>,
+        flags: i32,
+        mode: libc::mode_t,
+    ) -> io::Result<File> {
         check(&self.file.metadata()?, self.uid, true)?;
         let name = component(name)?;
         // SAFETY: the directory descriptor and C string remain valid. The
@@ -100,7 +114,7 @@ impl PrivateDirectory {
         Ok(unsafe { File::from_raw_fd(fd) })
     }
 
-    pub fn rename(&self, source: &str, target: &str) -> io::Result<()> {
+    pub fn rename(&self, source: impl AsRef<OsStr>, target: impl AsRef<OsStr>) -> io::Result<()> {
         let source = component(source)?;
         let target = component(target)?;
         // SAFETY: all descriptors and strings remain valid during the call.
@@ -119,7 +133,7 @@ impl PrivateDirectory {
         }
     }
 
-    pub fn remove(&self, name: &str) -> io::Result<()> {
+    pub fn remove(&self, name: impl AsRef<OsStr>) -> io::Result<()> {
         let name = component(name)?;
         // SAFETY: descriptor and C string are valid; flags select a file.
         let result = unsafe { libc::unlinkat(self.file.as_raw_fd(), name.as_ptr(), 0) };
@@ -134,8 +148,9 @@ impl PrivateDirectory {
     }
 }
 
-fn component(name: &str) -> io::Result<CString> {
-    if name.is_empty() || name == "." || name == ".." || name.contains('/') {
+fn component(name: impl AsRef<OsStr>) -> io::Result<CString> {
+    let name = name.as_ref().as_bytes();
+    if name.is_empty() || name == b"." || name == b".." || name.contains(&b'/') {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "expected one file name",

@@ -44,6 +44,19 @@ pub enum DiagnosticKind {
     Unknown,
 }
 
+impl DiagnosticKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Authentication => "authentication",
+            Self::HostKey => "host_key",
+            Self::Listener => "listener",
+            Self::Network => "network",
+            Self::RemoteRejected => "remote_rejected",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Diagnostic {
     pub kind: DiagnosticKind,
