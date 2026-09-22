@@ -22,9 +22,30 @@ tunnels.
 
 ## Target environment
 
-The initial supported platform is Linux on `x86_64` and `aarch64`. macOS may be
-added later. Windows is not an MVP target because the planned daemon IPC and
-process management are Unix-oriented.
+The initial release targets are Linux on `x86_64` and `aarch64`, and macOS on
+Apple Silicon (`aarch64`) and Intel (`x86_64`). Both operating systems must meet
+the same MVP acceptance criteria. Windows is not an MVP target.
+
+TunnelDeck runs on the local computer where the browser runs. Its SSH server
+may run a different OS, provided it supports the required forwarding behavior.
+No TunnelDeck installation on the SSH server is required.
+
+## Primary workflow: remote development ports
+
+Choose an SSH config host, enter the remote development-server port (for example
+3000), and start Local forwarding to remote `127.0.0.1:3000`. Default the local
+listener to `127.0.0.1:3000`. Show the actual local address, with an explicit
+HTTP/HTTPS browser-open action for web services; not every TCP service is HTTP.
+Advanced forwarding options remain available separately.
+
+If the local port is occupied, propose an available alternative such as 3001
+and let the user select it. Change only the local port, save that selection,
+and show the resulting address. Never terminate the existing listener or
+silently change ports on restart. Candidate availability is advisory: if a
+process claims it before SSH binds, report the failure and offer another choice.
+CLI requests for a specific port fail with a structured conflict error and do
+not prompt or silently substitute ports. Automatic remote port discovery is
+outside the MVP.
 
 ## MVP capabilities
 
@@ -34,6 +55,14 @@ process management are Unix-oriented.
 - Show alias, hostname, port, user, identity selection, and proxy/jump settings.
 - Refresh the host list without restarting the application.
 - Provide a connection test with a useful diagnostic message.
+- Reuse existing `~/.ssh/config` aliases without re-entering connection details.
+  Delegate user, identity, jump-host, and host-key settings to OpenSSH. TunnelDeck
+  does not edit this file. Existing forwarding directives are suppressed for
+  managed connections so they do not start additional untracked listeners.
+- After the MVP, offer explicit import of existing `LocalForward`,
+  `RemoteForward`, and `DynamicForward` settings into editable TunnelDeck rules,
+  with preview and conflict validation before saving. This is separate from
+  importing another application's configuration.
 
 ### Forwarding rules
 
@@ -47,14 +76,16 @@ process management are Unix-oriented.
 A rule should contain at least:
 
 ```text
+id
 name
 ssh_host_alias
-type = local | remote | dynamic
+kind = local | remote | dynamic
 bind_address
-local_port
-remote_host
-remote_port
+bind_port
+destination_host
+destination_port
 auto_start
+reconnect
 ```
 
 Fields that do not apply to a forwarding type should be omitted from its
@@ -67,6 +98,9 @@ serialized representation rather than filled with misleading values.
 - Optional reconnect with capped exponential backoff.
 - Restore configured auto-start rules when the daemon starts.
 - Provide graceful stop first and forced termination only as a fallback.
+- New rules default to auto-start and reconnect disabled. Active means forwarding
+  setup was accepted, not that the destination service is healthy. See
+  [design decisions](design-decisions.md) for exact behavior and crash boundaries.
 
 ### Observability
 
@@ -79,18 +113,24 @@ serialized representation rather than filled with misleading values.
 
 ### Configuration
 
-Use XDG paths by default:
+On Linux, use XDG paths by default:
 
 ```text
 $XDG_CONFIG_HOME/tunnel-deck/config.toml
-$XDG_STATE_HOME/tunnel-deck/state.json
 $XDG_STATE_HOME/tunnel-deck/tunnel-deck.log
 $XDG_RUNTIME_DIR/tunnel-deck/tdeck.sock
 ```
 
+On macOS, default to `~/Library/Application Support/TunnelDeck/config.toml`
+and `~/Library/Logs/TunnelDeck/tunnel-deck.log`. Use a private short runtime
+directory as specified in [platform decisions](design-decisions.md#platform-support).
+Explicit XDG config/state overrides are supported on either OS.
+
 Provide documented fallbacks when an XDG variable is absent. Runtime sockets
 must be accessible only by the current user. Configuration writes should be
 atomic and should preserve a recoverable previous copy when migration occurs.
+Version 1 does not persist runtime process state. The accepted design decisions
+define path fallbacks and permissions.
 
 ## TUI outline
 
@@ -152,7 +192,7 @@ Ctrl+C          Exit safely and restore terminal
 
 ## MVP acceptance criteria
 
-1. A fresh Linux user can install one binary and launch `tdeck`.
+1. A fresh Linux or macOS user can install the appropriate binary and launch `tdeck`.
 2. The TUI discovers a host from the user's SSH config.
 3. The user can create and persist one rule without editing a file.
 4. Local, remote, and dynamic rules can be started and stopped.
@@ -162,4 +202,5 @@ Ctrl+C          Exit safely and restore terminal
 8. The CLI can list and control the same rules managed by the TUI.
 9. Unit tests cover configuration, validation, state transitions, and command
    construction; integration tests cover daemon IPC and process lifecycle.
-
+10. A user can forward a remote development port, choose an alternative when
+    the local port is occupied, and open the resulting local web address.

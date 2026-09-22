@@ -27,14 +27,10 @@ when the terminal closes and behavior would diverge between CLI and TUI.
 
 ## Initial SSH strategy
 
-For the first implementation, prefer supervising the system OpenSSH client
-over implementing SSH transport in-process. Typical launches resemble:
-
-```text
-ssh -N -T -o ExitOnForwardFailure=yes -L ... <host-alias>
-ssh -N -T -o ExitOnForwardFailure=yes -R ... <host-alias>
-ssh -N -T -o ExitOnForwardFailure=yes -D ... <host-alias>
-```
+Supervise the system OpenSSH client. Each rule attempt owns a foreground
+private master; add the requested forwarding through its control socket after
+authentication. See [accepted design decisions](design-decisions.md) for exact
+arguments, readiness, guardian ownership, and daemon-crash cleanup.
 
 The actual argument list must be constructed without invoking a shell. Passing
 the configured host alias to OpenSSH preserves compatibility with the user's
@@ -47,7 +43,8 @@ Important implementation details:
 - Locate and validate the `ssh` executable at startup.
 - Never concatenate user values into a shell command.
 - Capture stderr for diagnostics with bounded buffering.
-- Use `ExitOnForwardFailure=yes` so a failed listener is not shown as active.
+- Report Active only after the control forwarding request succeeds; do not
+  imply that the destination service is reachable.
 - Define how interactive authentication works before claiming password support.
   A background process without a controlling terminal cannot safely prompt in
   the ordinary way.
@@ -97,6 +94,7 @@ src/
 │   └── process.rs
 ├── ipc/                    Versioned request/response/event protocol
 ├── config/                 XDG paths, TOML, migration, atomic persistence
+├── platform/               Linux/macOS paths, process operations, browser launch
 └── logging/
 ```
 
@@ -106,7 +104,8 @@ without terminals, sockets, or real SSH connections.
 
 ## IPC
 
-Use a per-user Unix socket under `$XDG_RUNTIME_DIR` when available. The protocol
+Use a per-user Unix socket under the shared platform path resolver's runtime
+directory (see [platform support](design-decisions.md#platform-support)). The protocol
 should be explicitly versioned from its first revision.
 
 Requirements:
@@ -125,18 +124,9 @@ until measurement demonstrates a problem.
 
 ## State model
 
-Model rule runtime state explicitly:
-
-```text
-Stopped → Starting → Active
-              │         │
-              ▼         ▼
-            Failed ← Reconnecting
-              ▲         │
-              └─────────┘
-
-Active/Reconnecting/Failed → Stopping → Stopped
-```
+Model rule runtime state explicitly using the transitions and deadlines in
+[runtime state](design-decisions.md#runtime-state-and-deadlines), including stop
+during Starting and cancellation of stale attempt events.
 
 Every transition should be caused by a named event and be unit-testable. Avoid
 deriving state solely from whether a PID exists.
@@ -165,6 +155,8 @@ process state and re-establish only rules whose policy requests restoration.
 - Process tests: use a fake `ssh` executable with deterministic stdout, stderr,
   exit timing, and signal behavior.
 - IPC integration tests: daemon in a temporary runtime directory.
+- Native Linux and macOS process tests: descriptor inheritance, guardian
+  cleanup, lock ownership, signals, and terminal restoration. The existing
+  Linux-only experiment is not evidence of macOS support.
 - Optional end-to-end tests: containerized SSH server for all three forwarding
   types; these should not depend on a developer's personal SSH configuration.
-
