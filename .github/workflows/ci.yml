@@ -29,6 +29,8 @@ jobs:
         run: rustup show active-toolchain
       - name: Test Symphony admission hooks
         run: python3 -m unittest discover -s tests/symphony -v
+      - name: Test release packaging and dependency notices
+        run: python3 -m unittest discover -s tests/release -v
       - name: Check formatting
         run: cargo fmt --check
       - name: Run Clippy

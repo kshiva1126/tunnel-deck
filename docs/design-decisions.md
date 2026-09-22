@@ -85,6 +85,24 @@ packaged-artifact native smoke as `not_run`. Ordinary native CI or a cross-build
 does not upgrade that field. Native distribution smoke on all four targets,
 macOS 13/Intel acceptance, signing, and notarization remain later M5 work.
 
+### M5 release audit and notices
+
+GH-50 audits the four-target locked dependency union rather than only the host
+graph. A deterministic generator retains each reachable package's upstream
+license/notice files in `THIRD_PARTY_LICENSES.txt`; release archives contain
+that file beside TunnelDeck's MIT `LICENSE`. A behavior test regenerates and
+compares the notice bytes and verifies both files are packaged. This was chosen
+over a hand-maintained allow-list because dependency changes could otherwise
+leave required attribution stale. The audit classification, RustSec reachability
+analysis, resource-limit gaps, commands, versions, and native/human unknowns are
+recorded once in [the release audit](release-audit.md).
+
+No IPC, persistence, authentication, or process-ownership contract changes in
+this audit. Same-user connection/thread and configured guardian counts remain
+OS-limited rather than application-limited; future caps require a focused
+compatibility-reviewed hardening change. Native release-archive smoke, macOS 13
+and Intel validation, signing, and notarization remain release-owner work.
+
 ## One private OpenSSH master per rule
 
 Use a foreground OpenSSH master with a fresh control socket for each start

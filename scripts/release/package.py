@@ -106,6 +106,13 @@ def main() -> None:
             with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=args.source_date_epoch) as zipped:
                 with tarfile.open(fileobj=zipped, mode="w", format=tarfile.USTAR_FORMAT) as archive:
                     add_file(archive, Path("LICENSE"), f"{stem}/LICENSE", 0o644, args.source_date_epoch)
+                    add_file(
+                        archive,
+                        Path("THIRD_PARTY_LICENSES.txt"),
+                        f"{stem}/THIRD_PARTY_LICENSES.txt",
+                        0o644,
+                        args.source_date_epoch,
+                    )
                     add_file(archive, staged, f"{stem}/release.json", 0o644, args.source_date_epoch)
                     add_file(archive, args.binary, f"{stem}/tdeck", 0o755, args.source_date_epoch)
 
