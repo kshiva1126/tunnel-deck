@@ -202,6 +202,39 @@ class HookTests(unittest.TestCase):
                 self.assert_blocked()
                 self.clear_stop()
 
+    def test_invalid_issue_number_fails_closed(self):
+        for number in (24.0, "24", True, None, 25):
+            with self.subTest(number=number):
+                self.config["issue"][0]["number"] = number
+                self.save()
+                self.assert_blocked()
+                self.clear_stop()
+
+    def test_invalid_page_shapes_fail_closed(self):
+        for kind in ("issue", "dependencies", "prs"):
+            original = self.config[kind]
+            for pages in ([], {}, [None], [{"message": "synthetic-secret-do-not-log"}]):
+                with self.subTest(kind=kind, pages=pages):
+                    self.config[kind] = pages
+                    self.save()
+                    self.assert_blocked()
+                    self.clear_stop()
+            self.config[kind] = original
+
+    def test_verify_is_read_only_on_success_and_refusal(self):
+        for dependencies, status in (([], 0), ([dependency(22, "open")], 1)):
+            with self.subTest(dependencies=dependencies):
+                self.config["dependencies"] = [dependencies]
+                self.save()
+                fixture = (self.root / "fixture.json").read_bytes()
+                self.assertEqual(self.hook("verify").returncode, status)
+                self.assertEqual((self.root / "fixture.json").read_bytes(), fixture)
+                self.assertFalse((self.root / "state").exists())
+                self.assertFalse((self.root / "codex-ran").exists())
+                for call in self.calls().splitlines():
+                    self.assertTrue(call.startswith("gh api "), call)
+                    self.assertIn("--method GET ", call)
+
     def test_closed_review_blocked_and_unqueued_issues(self):
         for state, labels in (("closed", ["agent-ready"]), ("open", ["agent-ready", "human-review"]),
                               ("open", ["agent-ready", "blocked"]), ("open", [])):

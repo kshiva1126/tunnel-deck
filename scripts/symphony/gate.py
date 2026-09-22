@@ -57,7 +57,8 @@ def check(number):
         raise Refused("GitHub API returned an invalid issue")
     issue = pages[0]
     labels = issue.get("labels")
-    if (issue.get("number") != number or issue.get("state") not in ("open", "closed")
+    if (type(issue.get("number")) is not int or issue["number"] != number
+            or issue.get("state") not in ("open", "closed")
             or "pull_request" in issue or not isinstance(labels, list)
             or any(not isinstance(label, dict) or not isinstance(label.get("name"), str)
                    for label in labels)):

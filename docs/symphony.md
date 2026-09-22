@@ -107,7 +107,9 @@ branch. An open, closed, or merged PR on that branch requires human review;
 automatic reruns do not update previously published PRs. This deliberately
 trades automatic PR follow-up for protection against replaying merged work.
 API errors, inaccessible dependencies, missing permissions, timeouts, unknown
-states, and invalid/incomplete responses all refuse admission. Diagnostics
+states, and invalid/incomplete responses all refuse admission. Validation
+also rejects non-integer issue numbers, including JSON floating-point values
+that compare equal to the requested number. Diagnostics
 contain fixed reasons and validated dependency repository/issue identifiers,
 never issue titles/bodies, API response text, CLI stderr, or token values.
 
@@ -249,11 +251,14 @@ runtime isolation, and remote Linux/macOS CI are not claimed by local fake
 results; remote CI remains a human-review condition after publication.
 
 GH-24 local verification (2026-09-22): Linux x86_64, Python 3.11.2, Rust 1.85.0.
-All 19 harness tests, `cargo fmt --check`, Clippy with `-D warnings`, and
+All 22 harness tests, `cargo fmt --check`, Clippy with `-D warnings`, and
 `cargo test --all-features` passed (47 unit tests, 3 CLI tests, doc-tests).
 The first Rust test run could not find `rustdoc`; rerunning with
 `/usr/local/cargo/bin` on PATH passed. Shell syntax and `git diff --check` also
 passed. Follow-up verification also covers worker shutdown when a stopped
 issue is dispatched again; all three Rust checks passed again with the full
-toolchain PATH. No live GitHub writes, native dependency E2E, Docker runtime test, or
+toolchain PATH. Additional tests cover invalid issue numbers and page shapes,
+and verify that the E2E verifier makes only GET requests and writes no local
+admission state on either success or refusal.
+No live GitHub writes, native dependency E2E, Docker runtime test, or
 remote Linux/macOS CI were run in this agent workspace.
