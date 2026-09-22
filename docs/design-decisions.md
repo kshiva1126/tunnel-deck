@@ -285,3 +285,26 @@ construct paths. Linux/macOS GitHub CI has not run for these working-tree
 changes, and native macOS remains unverified. Remote Linux/macOS CI is a
 post-publication human-review condition; the local checks permit committing
 this implementation but do not mark the issue complete.
+
+### M2 daemon IPC foundation implementation
+
+The public daemon socket uses the existing version 1 newline-JSON contract,
+with a 1 MiB encoded-frame limit and five-second client/server I/O deadlines.
+Malformed and oversized frames close only their connection after a structured
+error. Version mismatch is rejected before dispatch. UUID request correlation
+is checked by clients. Event sequence state is daemon-owned; each subscriber
+has a 64-event bounded queue and is disconnected on lag.
+
+On-demand clients spawn the hidden `daemon run` entry point only when connect
+fails, then wait for readiness. Every contender first opens the permanent
+0600 lock and obtains nonblocking `flock`; only its owner may remove a stale
+current-user socket and bind a new 0600 socket. Unsafe runtime paths and socket
+objects are rejected without permission repair. The lock file is never
+unlinked. This preserves the later guardian inheritance boundary.
+
+`DaemonManager` is the sole configuration writer. It loads validated rules at
+startup, atomically persists add/remove before publishing events, and keeps
+start-request intent in memory. Repeated start/stop returns success with an
+explicit `changed` flag and emits no duplicate event. This issue does not claim
+that a start launches OpenSSH; process supervision and guardian cleanup remain
+the next Milestone 2 slice.

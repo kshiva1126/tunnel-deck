@@ -1,7 +1,7 @@
 //! TunnelDeck application library.
 //!
-//! Host discovery is available while tunnel management remains deliberately
-//! unavailable until later milestones.
+//! Host discovery and the daemon IPC foundation are available. OpenSSH tunnel
+//! process supervision remains deliberately unavailable until later work.
 
 pub mod application;
 pub mod cli;

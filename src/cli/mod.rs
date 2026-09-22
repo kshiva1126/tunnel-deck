@@ -1,10 +1,24 @@
 use clap::{Args, Parser, Subcommand};
 
-use std::{env, path::PathBuf};
+use std::{
+    env,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use crate::{
     application::hosts::{ConnectionOutcome, HostCatalog},
+    daemon::{
+        lifecycle::{self, DaemonEndpoint},
+        manager::DaemonManager,
+    },
     error::AppError,
+    ipc::{Client, DEFAULT_TIMEOUT, Operation, Request, Response},
+    platform::{
+        CURRENT,
+        paths::{Paths, XdgOverrides},
+        private_fs::current_uid,
+    },
 };
 
 #[derive(Debug, Parser)]
@@ -89,29 +103,100 @@ impl Cli {
             None => "TUI",
             Some(Command::Host { command }) => return execute_host(command),
             Some(Command::Forward { command }) => match command {
-                ForwardCommand::List => "forward listing",
+                ForwardCommand::List => {
+                    return daemon_call(Operation::ForwardList, serde_json::json!({}));
+                }
                 ForwardCommand::Add => "forward creation",
                 ForwardCommand::Remove(args) => {
-                    let _ = args.rule;
-                    "forward removal"
+                    return daemon_rule_call(Operation::ForwardRemove, args.rule);
                 }
                 ForwardCommand::Start(args) => {
-                    let _ = args.rule;
-                    "forward start"
+                    return daemon_rule_call(Operation::ForwardStart, args.rule);
                 }
                 ForwardCommand::Stop(args) => {
-                    let _ = args.rule;
-                    "forward stop"
+                    return daemon_rule_call(Operation::ForwardStop, args.rule);
                 }
             },
-            Some(Command::Status) => "status reporting",
+            Some(Command::Status) => return daemon_call(Operation::Status, serde_json::json!({})),
             Some(Command::Daemon { command }) => match command {
-                DaemonCommand::Run => "daemon",
+                DaemonCommand::Run => return run_daemon(),
             },
         };
 
         Err(AppError::Unavailable { feature })
     }
+}
+
+fn resolved_paths() -> Result<Paths, AppError> {
+    let home = env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| AppError::Configuration("HOME is not set".to_owned()))?;
+    let override_path = |name| {
+        env::var_os(name)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    };
+    let config = override_path("XDG_CONFIG_HOME");
+    let state = override_path("XDG_STATE_HOME");
+    let runtime = override_path("XDG_RUNTIME_DIR");
+    Paths::resolve(
+        CURRENT,
+        &home,
+        current_uid(),
+        XdgOverrides {
+            config: config.as_deref(),
+            state: state.as_deref(),
+            runtime: runtime.as_deref(),
+        },
+    )
+    .map_err(|error| AppError::Configuration(error.to_string()))
+}
+
+fn daemon_rule_call(operation: Operation, rule: String) -> Result<(), AppError> {
+    let id = uuid::Uuid::parse_str(&rule)
+        .map_err(|_| AppError::Configuration("rule must be a UUID".to_owned()))?;
+    daemon_call(operation, serde_json::json!({"rule_id": id}))
+}
+
+fn daemon_call(operation: Operation, payload: serde_json::Value) -> Result<(), AppError> {
+    let paths = resolved_paths()?;
+    let socket = paths
+        .socket_path(CURRENT)
+        .map_err(|error| AppError::Ipc(error.to_string()))?;
+    let executable = env::current_exe().map_err(|error| AppError::Ipc(error.to_string()))?;
+    lifecycle::ensure_running(&socket, &executable, DEFAULT_TIMEOUT)
+        .map_err(|error| AppError::Ipc(error.to_string()))?;
+    let request = Request::new(operation, payload);
+    let response = Client::connect(&socket, DEFAULT_TIMEOUT)
+        .and_then(|mut client| client.call(&request))
+        .map_err(|error| AppError::Ipc(error.to_string()))?;
+    match response {
+        Response::Success(value) => {
+            println!("{}", value.result);
+            Ok(())
+        }
+        Response::Failure(value) => Err(AppError::Ipc(format!(
+            "{:?}: {}",
+            value.error.code, value.error.message
+        ))),
+    }
+}
+
+fn run_daemon() -> Result<(), AppError> {
+    let paths = resolved_paths()?;
+    let socket = paths
+        .socket_path(CURRENT)
+        .map_err(|error| AppError::Ipc(error.to_string()))?;
+    let endpoint = match DaemonEndpoint::bind(&paths.runtime, &socket) {
+        Ok(value) => value,
+        Err(lifecycle::DaemonError::AlreadyRunning) => return Ok(()),
+        Err(error) => return Err(AppError::Ipc(error.to_string())),
+    };
+    let config_directory = paths.config.parent().unwrap_or_else(|| Path::new("/"));
+    let manager = DaemonManager::open(config_directory)
+        .map_err(|error| AppError::Configuration(error.to_string()))?;
+    lifecycle::run(endpoint, Arc::new(manager)).map_err(|error| AppError::Ipc(error.to_string()))
 }
 
 fn execute_host(command: HostCommand) -> Result<(), AppError> {
