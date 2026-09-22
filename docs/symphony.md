@@ -222,7 +222,11 @@ timeout, replay/merge rejection, pre-push rechecking, one-use admission, token
 removal, failed label transitions, durable retry suppression, shutdown on
 redispatch of a stopped issue, manual recovery, dependencies becoming open or
 the dependency API failing/returning malformed JSON during an admitted turn,
-and supervisor shutdown. `setpriv` is simulated: those tests verify dispatch
+and supervisor shutdown. Recovery coverage follows the complete path in both
+host and simulated Docker modes: closure and relabeling alone remain stopped;
+clearing the stop while the worker is down permits fresh checks and exactly one
+publication; subsequent dispatch cannot launch Codex or publish again.
+`setpriv` is simulated: those tests verify dispatch
 parity, not native Docker UID isolation. CI runs this harness on both OSes.
 
 For a safe check against **real GitHub dependencies**, an owner can use
@@ -323,3 +327,10 @@ halt redispatch and worker restart, and invoke no GitHub, Git, Codex, or publish
 commands. Existing production code already satisfies this behavior; this
 follow-up adds regression coverage and documents recovery. Native dependency
 E2E, Docker runtime isolation, and remote Linux/macOS CI remain unverified.
+
+Recovery publication verification (2026-09-22): all 28 harness tests and the
+three required Rust checks passed on Linux. The existing recovery test now
+continues through Codex launch, the real publish hook with fake Git/GitHub,
+permit consumption, and replay suppression in both command modes. Production
+behavior is unchanged. Native GitHub E2E, Docker isolation, and macOS were not
+run; remote CI remains a human-review condition after publication.

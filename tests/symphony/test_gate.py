@@ -422,14 +422,43 @@ class HookTests(unittest.TestCase):
                     self.clear_stop()
 
     def test_manual_recovery_requires_fresh_dependency_check(self):
-        self.config["dependencies"] = [[dependency(22, "open")]]
-        self.save()
-        self.assert_blocked()
-        self.config["dependencies"] = [[dependency(22, "closed")]]
-        self.save()  # Operator restores agent-ready and removes blocked.
-        self.assertNotEqual(self.hook("before").returncode, 0)
-        self.clear_stop()
-        self.assertEqual(self.hook("before").returncode, 0)
+        for docker in (False, True):
+            with self.subTest(docker=docker):
+                if docker:
+                    self.env.update(SYMPHONY_AGENT_UID=str(os.getuid()),
+                                    SYMPHONY_AGENT_GID=str(os.getgid()))
+                self.config["dependencies"] = [[dependency(22, "open")]]
+                self.save()
+                self.assert_blocked()
+                self.config["dependencies"] = [[dependency(22, "closed")]]
+                self.save()  # Operator restores agent-ready and removes blocked.
+                calls = self.calls()
+                self.assertNotEqual(self.hook("before").returncode, 0)
+                self.assertEqual(calls, self.calls(), "relabeling alone cannot resume work")
+
+                self.clear_stop()  # Complete documented recovery with worker stopped.
+                (self.root / "calls").unlink()
+                before, after = self.attempt()
+                self.assertEqual(before.returncode, 0, before.stderr)
+                self.assertEqual(after.returncode, 0, after.stderr)
+                self.assertTrue((self.root / "codex-ran").exists())
+                self.assertIn("/dependencies/blocked_by", self.calls())
+                self.assertEqual(self.calls().count("push --set-upstream"), 1)
+                self.assertEqual(self.calls().count("gh pr create"), 1)
+                self.assertFalse((self.root / "state/GH-24.permit").exists())
+                self.assertIn("published", (self.root / "state/GH-24.stopped").read_text())
+
+                # Successful recovery is still a one-shot publication.
+                (self.root / "codex-ran").unlink()
+                calls = self.calls()
+                before, after = self.attempt()
+                self.assertNotEqual(before.returncode, 0)
+                self.assertEqual(after.returncode, 0)
+                self.assertFalse((self.root / "codex-ran").exists())
+                self.assertEqual(calls, self.calls())
+                self.assertTrue((self.root / "state/halt").exists())
+                self.clear_stop()
+                (self.root / "calls").unlink()
 
     def test_pre_push_verify_rejects_new_dependency(self):
         self.config["dependencies"] = [[dependency(22, "open")]]
