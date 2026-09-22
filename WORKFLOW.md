@@ -61,6 +61,16 @@ Implement the issue, add behavior-focused tests, and run:
 2. `cargo clippy --all-targets --all-features -- -D warnings`
 3. `cargo test --all-features`
 
+During the turn, update `.symphony-run-report.json` without changing its schema,
+issue number, or run ID. Record a concise reviewable summary (not private
+chain-of-thought): scope, facts, decisions and reasons, rejected alternatives,
+entry points/state owner/external effects/failure cleanup, test commands and
+results, unknowns or owner decisions, and the final status. Use `completed`,
+`failed`, `blocked`, or `interrupted`; leave commit and pull request as null
+because the trusted hook fills them. Never put credentials or sensitive
+environment values in the report. The trusted hook validates it and upserts one
+marked comment on the source Issue.
+
 If all acceptance criteria are met and every required check passes, commit the
 intended changes on the branch prepared by the harness. Use a focused commit
 message. Do not push, create a pull request, change labels, or close the issue;

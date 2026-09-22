@@ -37,3 +37,9 @@ esac
 
 printf 'Preflight passed for GitHub issue #%s on %s\n' \
   "$issue_number" "$current_branch"
+
+run_id="GH-$issue_number-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+mkdir -p "$workspace/.git/info"
+printf '%s\n' '.symphony-run-report.json' >>"$workspace/.git/info/exclude"
+python3 "$control_root/scripts/symphony/run_report.py" \
+  init "$workspace" "$issue_number" "$run_id"
