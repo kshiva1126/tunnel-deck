@@ -392,11 +392,7 @@ fn print_human(operation: Operation, value: &serde_json::Value) {
 
 fn run_daemon() -> Result<(), AppError> {
     let paths = resolved_paths()?;
-    let log_directory = paths.log.parent().unwrap_or_else(|| Path::new("/"));
-    crate::platform::private_fs::PrivateDirectory::open(log_directory)
-        .map_err(|error| AppError::Configuration(error.to_string()))?;
-    let log = RotatingLog::new(&paths.log, DEFAULT_MAX_BYTES, DEFAULT_BACKUPS);
-    log.validate()
+    let log = RotatingLog::open(&paths.log, DEFAULT_MAX_BYTES, DEFAULT_BACKUPS)
         .map_err(|error| AppError::Configuration(error.to_string()))?;
     let socket = paths
         .socket_path(CURRENT)

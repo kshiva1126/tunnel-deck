@@ -926,7 +926,8 @@ mod tests {
         let root = private_tempdir();
         let log_path = root.path().join("events.log");
         let manager =
-            DaemonManager::open_logged(root.path(), RotatingLog::new(&log_path, 1024, 1)).unwrap();
+            DaemonManager::open_logged(root.path(), RotatingLog::open(&log_path, 1024, 1).unwrap())
+                .unwrap();
         let id = Uuid::new_v4();
         result(manager.handle(&request(Operation::ForwardAdd, json!({"kind":"dynamic","id":id,"name":"proxy","ssh_host_alias":"host","bind_address":"127.0.0.1","bind_port":1080,"auto_start":false,"reconnect":false}))));
         result(manager.handle(&request(Operation::SettingsUpdate, json!({"theme":"system","log_level":"error","default_reconnect":false,"default_auto_start":false}))));

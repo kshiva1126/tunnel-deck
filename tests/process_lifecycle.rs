@@ -12,7 +12,7 @@ use tunnel_deck::{
 };
 
 fn test_log(root: &Path) -> RotatingLog {
-    RotatingLog::new(root.join("tunnel-deck.log"), 1024 * 1024, 3)
+    RotatingLog::open(&root.join("tunnel-deck.log"), 1024 * 1024, 3).unwrap()
 }
 
 fn private_tempdir() -> TempDir {

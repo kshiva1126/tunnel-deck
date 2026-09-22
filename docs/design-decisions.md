@@ -428,8 +428,10 @@ used to form failure/reconnect records.
 
 The log directory and every active/rotation file must remain private regular
 objects owned by the current user; symlinks, hardlinks, wrong modes, and unsafe
-rotation slots reject startup or the affected record. A process-local writer
-lock serializes size checking, rotation, and append. Rotation keeps three 1 MiB
-generations, and logging failure remains observational: it cannot roll back an
-already completed tunnel transition. GH-42's TOML v2 and IPC v1 settings shapes
-are unchanged.
+rotation slots reject startup or the affected record. The logger retains the
+validated private-directory descriptor and performs append, removal, and
+rotation with descriptor-relative operations, so replacing a parent path cannot
+redirect log output. A process-local writer lock serializes size checking,
+rotation, and append. Rotation keeps three 1 MiB generations, and logging
+failure remains observational: it cannot roll back an already completed tunnel
+transition. GH-42's TOML v2 and IPC v1 settings shapes are unchanged.
