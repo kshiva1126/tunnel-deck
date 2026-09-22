@@ -128,6 +128,13 @@ Commands intended for automation should support a stable JSON output mode.
 Rule arguments may accept an exact unique name for convenience, but responses
 and persisted references should always include the UUID.
 
+The implemented Local CLI uses explicit flags for non-interactive creation and
+supports global `--json` output. Rule start, stop, and removal accept an exact
+name or UUID and always return the UUID. Exit statuses distinguish usage (2),
+not found (4), conflict (5), service unavailable (6), and internal failure
+(70). An occupied explicitly requested local port is a conflict; the CLI does
+not choose a replacement or wait for input.
+
 ### OpenSSH command construction
 
 Spawn OpenSSH directly with an argument vector and never through a shell.

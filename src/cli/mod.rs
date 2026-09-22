@@ -25,10 +25,13 @@ use crate::{
 #[command(
     name = "tdeck",
     version,
-    about = "Manage SSH port forwarding (implementation in progress)",
-    long_about = "TunnelDeck manages SSH hosts and will manage port forwarding from a TUI and scriptable CLI.\n\nSSH host listing, details, and connection tests are available; tunnel operations are not implemented yet."
+    about = "Manage SSH port forwarding",
+    long_about = "TunnelDeck manages SSH hosts and Local forwarding through a per-user daemon and scriptable CLI.\n\nThe terminal UI and additional forwarding types remain in development."
 )]
 pub struct Cli {
+    /// Emit one JSON value for automation
+    #[arg(long, global = true)]
+    json: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -75,8 +78,8 @@ struct HostAliasArgs {
 enum ForwardCommand {
     /// List forwarding rules
     List,
-    /// Add a forwarding rule (not implemented)
-    Add,
+    /// Add a Local forwarding rule
+    Add(AddArgs),
     /// Remove a stopped forwarding rule
     Remove(RuleArgs),
     /// Start a forwarding rule
@@ -87,8 +90,28 @@ enum ForwardCommand {
 
 #[derive(Debug, Args)]
 struct RuleArgs {
-    /// Rule UUID
+    /// Exact rule name or UUID
     rule: String,
+}
+
+#[derive(Debug, Args)]
+struct AddArgs {
+    #[arg(long)]
+    name: String,
+    #[arg(long = "host")]
+    ssh_host_alias: String,
+    #[arg(long, default_value = "127.0.0.1")]
+    bind_address: String,
+    #[arg(long)]
+    bind_port: u16,
+    #[arg(long, default_value = "127.0.0.1")]
+    destination_host: String,
+    #[arg(long)]
+    destination_port: u16,
+    #[arg(long)]
+    auto_start: bool,
+    #[arg(long)]
+    reconnect: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -110,25 +133,45 @@ struct GuardianArgs {
 
 impl Cli {
     pub fn execute(self) -> Result<(), AppError> {
+        let json_output = self.json;
         let feature = match self.command {
             None => "TUI",
-            Some(Command::Host { command }) => return execute_host(command),
+            Some(Command::Host { command }) => return execute_host(command, json_output),
             Some(Command::Forward { command }) => match command {
                 ForwardCommand::List => {
-                    return daemon_call(Operation::ForwardList, serde_json::json!({}));
+                    return daemon_call(Operation::ForwardList, serde_json::json!({}), json_output);
                 }
-                ForwardCommand::Add => "forward creation",
+                ForwardCommand::Add(args) => {
+                    return daemon_call(
+                        Operation::ForwardAdd,
+                        serde_json::json!({
+                            "kind": "local",
+                            "id": uuid::Uuid::new_v4(),
+                            "name": args.name,
+                            "ssh_host_alias": args.ssh_host_alias,
+                            "bind_address": args.bind_address,
+                            "bind_port": args.bind_port,
+                            "destination_host": args.destination_host,
+                            "destination_port": args.destination_port,
+                            "auto_start": args.auto_start,
+                            "reconnect": args.reconnect,
+                        }),
+                        json_output,
+                    );
+                }
                 ForwardCommand::Remove(args) => {
-                    return daemon_rule_call(Operation::ForwardRemove, args.rule);
+                    return daemon_rule_call(Operation::ForwardRemove, args.rule, json_output);
                 }
                 ForwardCommand::Start(args) => {
-                    return daemon_rule_call(Operation::ForwardStart, args.rule);
+                    return daemon_rule_call(Operation::ForwardStart, args.rule, json_output);
                 }
                 ForwardCommand::Stop(args) => {
-                    return daemon_rule_call(Operation::ForwardStop, args.rule);
+                    return daemon_rule_call(Operation::ForwardStop, args.rule, json_output);
                 }
             },
-            Some(Command::Status) => return daemon_call(Operation::Status, serde_json::json!({})),
+            Some(Command::Status) => {
+                return daemon_call(Operation::Status, serde_json::json!({}), json_output);
+            }
             Some(Command::Daemon { command }) => match command {
                 DaemonCommand::Run => return run_daemon(),
                 DaemonCommand::Guardian(args) => {
@@ -168,13 +211,19 @@ fn resolved_paths() -> Result<Paths, AppError> {
     .map_err(|error| AppError::Configuration(error.to_string()))
 }
 
-fn daemon_rule_call(operation: Operation, rule: String) -> Result<(), AppError> {
-    let id = uuid::Uuid::parse_str(&rule)
-        .map_err(|_| AppError::Configuration("rule must be a UUID".to_owned()))?;
-    daemon_call(operation, serde_json::json!({"rule_id": id}))
+fn daemon_rule_call(operation: Operation, rule: String, json: bool) -> Result<(), AppError> {
+    let payload = match uuid::Uuid::parse_str(&rule) {
+        Ok(id) => serde_json::json!({"rule_id": id}),
+        Err(_) => serde_json::json!({"rule_name": rule}),
+    };
+    daemon_call(operation, payload, json)
 }
 
-fn daemon_call(operation: Operation, payload: serde_json::Value) -> Result<(), AppError> {
+fn daemon_call(
+    operation: Operation,
+    payload: serde_json::Value,
+    json_output: bool,
+) -> Result<(), AppError> {
     let paths = resolved_paths()?;
     let socket = paths
         .socket_path(CURRENT)
@@ -193,13 +242,44 @@ fn daemon_call(operation: Operation, payload: serde_json::Value) -> Result<(), A
         .map_err(|error| AppError::Ipc(error.to_string()))?;
     match response {
         Response::Success(value) => {
-            println!("{}", value.result);
+            if json_output {
+                println!("{}", value.result);
+            } else {
+                print_human(operation, &value.result);
+            }
             Ok(())
         }
-        Response::Failure(value) => Err(AppError::Ipc(format!(
-            "{:?}: {}",
-            value.error.code, value.error.message
-        ))),
+        Response::Failure(value) => {
+            let error = value.error;
+            if json_output {
+                Err(AppError::JsonDaemon {
+                    code: error.code,
+                    message: error.message,
+                })
+            } else {
+                Err(AppError::Daemon {
+                    code: error.code,
+                    message: error.message,
+                })
+            }
+        }
+    }
+}
+
+fn print_human(operation: Operation, value: &serde_json::Value) {
+    match operation {
+        Operation::ForwardList => {
+            if let Some(rules) = value.as_array() {
+                for rule in rules {
+                    println!(
+                        "{}\t{}",
+                        rule["id"].as_str().unwrap_or("-"),
+                        rule["name"].as_str().unwrap_or("-")
+                    );
+                }
+            }
+        }
+        _ => println!("{value}"),
     }
 }
 
@@ -233,7 +313,7 @@ fn run_daemon() -> Result<(), AppError> {
     lifecycle::run(endpoint, Arc::new(manager)).map_err(|error| AppError::Ipc(error.to_string()))
 }
 
-fn execute_host(command: HostCommand) -> Result<(), AppError> {
+fn execute_host(command: HostCommand, json_output: bool) -> Result<(), AppError> {
     let home = env::var_os("HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
@@ -246,30 +326,51 @@ fn execute_host(command: HostCommand) -> Result<(), AppError> {
             for warning in &discovery.warnings {
                 eprintln!("warning: {:?} {}", warning.kind, warning.path.display());
             }
-            for alias in discovery.aliases {
-                println!("{alias}");
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::to_string(&discovery.aliases).expect("aliases serialize")
+                );
+            } else {
+                for alias in discovery.aliases {
+                    println!("{alias}");
+                }
             }
         }
         HostCommand::Show(args) => {
             let host = catalog.effective(&args.alias)?;
-            println!("alias: {}", host.alias);
-            println!("hostname: {}", host.hostname);
-            println!("user: {}", host.user);
-            println!("port: {}", host.port);
-            for identity in host.identity_files {
-                println!("identity-file: {identity}");
-            }
-            if let Some(proxy_jump) = host.proxy_jump {
-                println!("proxy-jump: {proxy_jump}");
-            }
-            if let Some(proxy_command) = host.proxy_command {
-                println!("proxy-command: {proxy_command}");
+            if json_output {
+                println!(
+                    "{}",
+                    serde_json::json!({"alias": host.alias, "hostname": host.hostname, "user": host.user, "port": host.port, "identity_files": host.identity_files, "proxy_jump": host.proxy_jump, "proxy_command": host.proxy_command})
+                );
+            } else {
+                println!("alias: {}", host.alias);
+                println!("hostname: {}", host.hostname);
+                println!("user: {}", host.user);
+                println!("port: {}", host.port);
+                for identity in host.identity_files {
+                    println!("identity-file: {identity}");
+                }
+                if let Some(proxy_jump) = host.proxy_jump {
+                    println!("proxy-jump: {proxy_jump}");
+                }
+                if let Some(proxy_command) = host.proxy_command {
+                    println!("proxy-command: {proxy_command}");
+                }
             }
         }
         HostCommand::Test(args) => {
             let outcome = catalog.test_connection(&args.alias)?;
             if outcome == ConnectionOutcome::Success {
-                println!("{}", outcome.diagnostic());
+                if json_output {
+                    println!(
+                        "{}",
+                        serde_json::json!({"success": true, "diagnostic": outcome.diagnostic()})
+                    );
+                } else {
+                    println!("{}", outcome.diagnostic());
+                }
             } else {
                 return Err(AppError::Connection(outcome.diagnostic().to_owned()));
             }

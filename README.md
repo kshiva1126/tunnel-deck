@@ -38,11 +38,18 @@ The CLI remains available for automation:
 ```text
 tdeck                         Open the TUI
 tdeck host list               List discovered SSH hosts
+tdeck forward add --name web --host server --bind-port 3000 --destination-port 3000
 tdeck forward list            List forwarding rules
-tdeck forward start <uuid>    Start a rule
-tdeck forward stop <uuid>     Stop a rule
+tdeck forward start <name-or-uuid>    Start a rule
+tdeck forward stop <name-or-uuid>     Stop a rule
 tdeck status                  Show a concise status summary
 ```
+
+Add `--json` to any command for machine-readable success output. Daemon errors
+are also reported as one JSON value on stderr; other errors remain plain text.
+Daemon errors use stable exit statuses: 2 for invalid input, 4 for a missing
+rule, 5 for a conflict, 6 for an unavailable operation, and 70 for an internal
+failure.
 
 The exact command tree should be validated during the first implementation
 milestone rather than treated as frozen.
