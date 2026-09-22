@@ -364,6 +364,35 @@ changes, and native macOS remains unverified. Remote Linux/macOS CI is a
 post-publication human-review condition; the local checks permit committing
 this implementation but do not mark the issue complete.
 
+### M6 effective-forward import preview
+
+The first SSH-config import slice reuses the bounded `ssh -F <config> -G --
+<alias>` query and consumes only its effective `localforward`, `remoteforward`,
+and `dynamicforward` lines. The application layer returns an ordered, typed
+preview and has no persistence, IPC, process, or logging effect. Callers supply
+immutable snapshots of TunnelDeck rules and running rule IDs; the preview does
+not allocate rule IDs or names because selection and saving belong to a later
+issue.
+
+OpenSSH's bracketed IPv4/IPv6 output is normalized to unbracketed domain values.
+An omitted Local/Dynamic bind address is represented as `*` when the effective
+client `GatewayPorts` value is `yes`, and as `localhost` otherwise. An omitted
+Remote bind remains `localhost` because the remote server's policy is separate.
+Exact repeated effective directives and exact existing rules are duplicates. A different Local/Dynamic
+candidate whose local listener overlaps an earlier supported candidate or an
+existing rule is a conflict. Remote listeners conflict only for the same SSH
+alias; they do not consume a local listener. An exact existing rule reports
+whether its supplied ID is currently running, without inspecting or changing
+daemon state.
+
+Unix-domain forwarding and destination-less RemoteForward (remote SOCKS) are
+classified as unsupported because TunnelDeck's versioned rule model cannot
+represent them; guessing a mapping or changing storage/IPC would violate this
+slice. Missing fields, zero/out-of-range ports, invalid bind addresses, invalid
+destination hosts, and non-UTF-8 query output are invalid with fixed typed
+reasons. The preview retains no raw diagnostic and does not log expanded
+effective values, which may contain sensitive paths or endpoints.
+
 ### M2 daemon IPC foundation implementation
 
 The public daemon socket uses the existing version 1 newline-JSON contract,

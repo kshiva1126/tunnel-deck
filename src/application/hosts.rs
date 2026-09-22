@@ -13,6 +13,10 @@ use glob::{MatchOptions, glob_with};
 use thiserror::Error;
 
 use crate::domain::host::HostAlias;
+use crate::{
+    application::import::{ImportPreview, preview_effective_forwards},
+    domain::rule::{Rule, RuleId},
+};
 
 const MAX_CONFIG_FILES: usize = 256;
 const MAX_INCLUDE_DEPTH: usize = 32;
@@ -128,6 +132,25 @@ impl HostCatalog {
 
     pub fn effective(&self, alias: &str) -> Result<EffectiveHost, HostError> {
         let alias = HostAlias::new(alias)?;
+        let output = self.effective_output(&alias)?;
+        parse_effective(alias.as_str(), &output)
+    }
+
+    /// Reads OpenSSH's effective forwarding directives and classifies import
+    /// candidates without changing desired or runtime state.
+    pub fn import_preview(
+        &self,
+        alias: &str,
+        existing_rules: &[Rule],
+        running_rule_ids: &[RuleId],
+    ) -> Result<ImportPreview, HostError> {
+        let alias = HostAlias::new(alias)?;
+        let output = self.effective_output(&alias)?;
+        preview_effective_forwards(alias.as_str(), &output, existing_rules, running_rule_ids)
+            .map_err(|_| HostError::InvalidEffectiveConfiguration)
+    }
+
+    fn effective_output(&self, alias: &HostAlias) -> Result<Vec<u8>, HostError> {
         let output = run_bounded(
             &self.ssh_executable,
             [
@@ -145,7 +168,7 @@ impl HostCatalog {
         if !output.status.success() {
             return Err(HostError::QueryFailed);
         }
-        parse_effective(alias.as_str(), &output.stdout)
+        Ok(output.stdout)
     }
 
     pub fn test_connection(&self, alias: &str) -> Result<ConnectionOutcome, HostError> {
@@ -603,6 +626,26 @@ exit 1
             catalog.test_connection("unknown-key").unwrap(),
             ConnectionOutcome::HostKeyVerificationFailed
         );
+    }
+
+    #[test]
+    fn import_preview_reuses_bounded_effective_query_without_writes() {
+        let (_directory, ssh) = fake_ssh(
+            r#"#!/bin/sh
+if [ "$1" != "-F" ] || [ "$2" != "/fixture/config" ] || [ "$3" != "-G" ]; then
+  exit 64
+fi
+printf 'localforward [127.0.0.1]:3000 [::1]:80\ndynamicforward [::1]:1080\n'
+"#,
+        );
+        let catalog = HostCatalog::new("/fixture/config", "unused", ssh);
+        let preview = catalog.import_preview("sample", &[], &[]).unwrap();
+        assert_eq!(preview.ssh_host_alias, "sample");
+        assert_eq!(preview.candidates.len(), 2);
+        assert!(preview.candidates.iter().all(|candidate| matches!(
+            candidate.classification,
+            crate::application::import::ImportClassification::Supported
+        )));
     }
 
     #[test]
