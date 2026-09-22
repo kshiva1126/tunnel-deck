@@ -143,6 +143,10 @@ per second and terminates Symphony's process group (SIGTERM, then SIGKILL after
 5 seconds). Restart is refused until an operator clears the halt. This stops
 the scheduler even when GitHub cannot accept the transition. Always use the
 launchers: invoking the Symphony binary directly bypasses this shutdown guard.
+These rules also apply to label-update timeouts, whose remote outcome may be
+unknown. The local stop is written before either request; do not infer that a
+timed-out request left GitHub unchanged. Inspect the actual labels during
+manual recovery.
 
 Symphony v0.0.3 invokes `after_run` even when `before_run` fails. The gate
 therefore creates a one-use `GH-N.permit` only after the before hook succeeds,
@@ -345,3 +349,14 @@ hooks neither launch Codex nor make external calls, and redispatch requests
 worker shutdown. Existing production behavior is unchanged. Native GitHub E2E,
 Docker runtime isolation, and native macOS were not run; remote CI remains a
 post-publication human-review condition.
+
+Label-timeout verification (2026-09-22): all 30 harness tests and the three
+required Rust checks passed on Linux, Python 3.11.2 / Rust 1.85.0. New coverage
+uses actual subprocess timeouts for both label removal and addition in host
+and simulated Docker modes. It verifies that the stop exists before the label
+request, removal timeout requests shutdown, addition timeout preserves queue
+removal, and redispatch/restart cannot run Codex or publication or repeat API
+calls. Existing production code satisfies these cases; this follow-up adds
+tests and recovery clarification. Native GitHub E2E, Docker runtime isolation,
+and native macOS were not run; remote CI remains a post-publication review
+condition.

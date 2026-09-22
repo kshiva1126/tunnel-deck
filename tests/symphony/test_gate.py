@@ -42,7 +42,12 @@ if name == "gh":
                         for line in (root / "calls").read_text().splitlines())
             if count == 3:
                 config.update(change["response"])
-        if config.get("hang") == kind:
+        if config.get("hang") in (kind, method + ":" + kind):
+            if kind == "labels":
+                # Even an indeterminate remote write must start only after
+                # the local stop is durable enough to survive redispatch.
+                assert (pathlib.Path(os.environ["SYMPHONY_STATE_ROOT"]) / "GH-24.stopped").is_file()
+                (root / "label-timeout-started").touch()
             import time
             time.sleep(5)
         if config.get("fail") in (kind, method + ":" + kind):
@@ -553,6 +558,44 @@ class HookTests(unittest.TestCase):
         self.assertNotIn({"name": "agent-ready"}, issue["labels"])
         self.assertFalse((self.root / "state/halt").exists())
         self.assert_blocked()
+
+    def test_label_timeouts_preserve_stop_and_suppress_redispatch_in_both_modes(self):
+        for docker in (False, True):
+            for method in ("DELETE", "POST"):
+                with self.subTest(docker=docker, method=method):
+                    if docker:
+                        self.env.update(SYMPHONY_AGENT_UID=str(os.getuid()),
+                                        SYMPHONY_AGENT_GID=str(os.getgid()))
+                    self.config.update(hang=method + ":labels",
+                                       dependencies=[[dependency(22, "open")]])
+                    self.save()
+                    with patch.dict(os.environ, self.env, clear=True), \
+                            patch.object(gate, "API_TIMEOUT", 1), \
+                            patch.object(sys, "argv", ["gate.py", "before", str(self.workspace)]), \
+                            contextlib.redirect_stderr(io.StringIO()) as diagnostics:
+                        self.assertEqual(gate.main(), 1)
+                    self.assertTrue((self.root / "label-timeout-started").exists())
+                    self.assertNotIn("synthetic-secret", diagnostics.getvalue())
+                    self.assertTrue((self.root / "state/GH-24.stopped").exists())
+                    self.assertFalse((self.root / "state/GH-24.permit").exists())
+                    self.assertEqual((self.root / "state/halt").exists(), method == "DELETE")
+                    labels = json.loads((self.root / "fixture.json").read_text())["issue"][0]["labels"]
+                    self.assertEqual({"name": "agent-ready"} in labels, method == "DELETE")
+                    self.assertNotIn({"name": "blocked"}, labels)
+                    calls = self.calls()
+                    self.assertEqual(calls.count("--method DELETE"), 1)
+                    self.assertEqual(calls.count("--method POST"), int(method == "POST"))
+                    self.assert_blocked()
+                    self.assertEqual(calls, self.calls())
+                    result = subprocess.run(
+                        [sys.executable, str(SCRIPTS / "worker.py"), "codex", "app-server"],
+                        env=self.env, capture_output=True, timeout=10)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(calls, self.calls())
+                    self.assertFalse((self.root / "codex-ran").exists())
+                    self.clear_stop()
+                    (self.root / "calls").unlink()
+                    (self.root / "label-timeout-started").unlink()
 
     def test_relabel_stopped_issue_halts_worker_without_external_calls(self):
         self.config["dependencies"] = [[dependency(22, "open")]]
