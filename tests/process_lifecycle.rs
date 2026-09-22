@@ -261,14 +261,25 @@ fn private_master_is_forwarded_then_forced_down_and_cleaned() {
     let arguments = fs::read_to_string(log).unwrap();
     let lines: Vec<_> = arguments.lines().collect();
     assert_eq!(lines.len(), 3);
-    assert!(lines[0].contains("ClearAllForwardings=yes"));
-    assert!(!lines[0].contains(" -L "));
-    assert!(lines[1].contains("-F /dev/null"));
-    assert!(lines[1].contains("-O check"));
-    assert!(lines[2].contains("-O forward"));
-    assert!(lines[2].contains("ClearAllForwardings=no"));
-    assert!(lines[2].contains("-L 127.0.0.1:"));
-    assert!(lines[2].contains(":127.0.0.1:3000"));
+    // The master process and the first readiness probe are separate children,
+    // so either may reach the shared test log first on a loaded runner.
+    let master = lines
+        .iter()
+        .find(|line| line.contains("ClearAllForwardings=yes"))
+        .expect("master invocation");
+    let check = lines
+        .iter()
+        .find(|line| line.contains("-O check"))
+        .expect("readiness check invocation");
+    let forward = lines
+        .iter()
+        .find(|line| line.contains("-O forward"))
+        .expect("forward invocation");
+    assert!(!master.contains(" -L "));
+    assert!(check.contains("-F /dev/null"));
+    assert!(forward.contains("ClearAllForwardings=no"));
+    assert!(forward.contains("-L 127.0.0.1:"));
+    assert!(forward.contains(":127.0.0.1:3000"));
     let descendant_pid: i32 = fs::read_to_string(&descendant)
         .unwrap()
         .trim()
