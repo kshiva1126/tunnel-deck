@@ -27,6 +27,11 @@ work. Issues own scope, dependencies, and progress; `docs/` owns the product
 contract and design. Neither a chat transcript nor an AI summary replaces the
 current code and recorded test results.
 
+Submit changes through pull requests rather than direct pushes to `main`. CI
+runs automatically for pull requests and may be started manually when a
+post-merge check is needed. This avoids repeating the same Linux/macOS jobs on
+the resulting merge commit.
+
 1. **Choose a bounded change.** Read the issue, acceptance criteria, and
    dependencies. Large issues are work packages, not mandatory single PRs.
    Split them into linked child issues or explicit PR-sized steps with one
