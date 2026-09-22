@@ -25,7 +25,9 @@ Initial release targets are Linux (`x86_64`, `aarch64`) and macOS (Apple Silicon
 and Intel). These are planned targets, not claims of completed platform testing.
 The current baseline is Rust 1.85, Linux kernel 5.15 with glibc 2.35, and macOS
 13. Native runtime validation of the release targets remains tracked in the
-roadmap; CI compilation alone is not treated as that validation.
+roadmap; CI compilation alone is not treated as that validation. macOS support
+is currently **under validation**; automated and human evidence is tracked in
+the [macOS validation checklist](docs/macos-validation.md).
 
 Running `tdeck` opens the dashboard. A user should be able to discover SSH
 hosts, create a forwarding rule with a form, validate it, start or stop it,
@@ -72,6 +74,7 @@ ordinary successful work; documented exceptional cases stop for human review.
 - [Implementation plan](docs/implementation-plan.md)
 - [Accepted design decisions](docs/design-decisions.md)
 - [OpenSSH experiment results and reproduction](docs/openssh-probe.md)
+- [macOS automated and human validation](docs/macos-validation.md)
 
 ## License
 

@@ -226,7 +226,7 @@ mod tests {
         root
     }
     #[test]
-    fn concurrent_bind_has_one_owner_and_stale_socket_is_cleaned() {
+    fn concurrent_bind_has_one_owner() {
         let root = private_tempdir();
         let socket = root.path().join("tdeck.sock");
         let first = DaemonEndpoint::bind(root.path(), &socket).unwrap();
@@ -235,6 +235,12 @@ mod tests {
             Err(DaemonError::AlreadyRunning)
         ));
         drop(first);
+    }
+
+    #[test]
+    fn stale_socket_is_cleaned() {
+        let root = private_tempdir();
+        let socket = root.path().join("tdeck.sock");
         UnixListener::bind(&socket).unwrap();
         let endpoint = DaemonEndpoint::bind(root.path(), &socket).unwrap();
         assert_eq!(

@@ -2,16 +2,20 @@
 
 Executed successfully on 2026-09-22, Linux, OpenSSH 10.5p1 / OpenSSL 3.6.4.
 This is an architecture experiment, not the Rust application or a completed
-implementation milestone.
+implementation milestone. The probe is now portable to native macOS and the
+macOS CI job runs it with Apple's `/usr/bin/ssh`; the first complete native
+Apple Silicon result is recorded in job `106943102778`. The macOS 13 minimum,
+Intel result, and release-artifact checks remain pending.
 
-macOS is now also an initial release target. These results remain Linux-only;
-the experiment has not been ported to or executed on macOS. See
-[platform decisions](design-decisions.md#platform-support) for the required
-native macOS checks.
+macOS is also an initial release target. The results in the table below remain
+the recorded Linux run for this probe. Native CI evidence and release-artifact
+status are tracked in the [macOS validation checklist](macos-validation.md)
+for automated versus human checks and the architecture matrix.
 
 ## Reproduce
 
-Requires Linux, Python 3, and installed `ssh`, `sshd`, and `ssh-keygen`:
+Requires Linux or macOS, Python 3, and installed `ssh`, `sshd`, and
+`ssh-keygen`. On macOS the probe requires Apple's `/usr/bin/ssh`:
 
 ```text
 python3 experiments/openssh_probe.py
@@ -60,9 +64,9 @@ for the tested active-state daemon crash.
 - This tests one OpenSSH version and loopback network. Establish a supported
   version range and repeat on release architectures before shipping.
 - The guardian is a Python/fork prototype, not the Rust implementation. It uses
-  a shortened 0.3-second termination grace period and Linux subreaper behavior
-  in the test harness to reap its orphaned guardian. Production must verify its
-  own descriptor ownership, shutdown timing, and child reaping.
+  a shortened 0.3-second termination grace period. Completion is reported by
+  explicit pipe IPC after the guardian reaps SSH; listener closure and inherited
+  lock release are also checked without `/proc`, `prctl`, or subreapers.
 - Crashes during spawn/authentication/stop, simultaneous guardian failure,
   detached custom ProxyCommand descendants, and cancellation races remain
   untested. Do not expand the cleanup guarantee beyond the design document.
@@ -71,6 +75,5 @@ for the tested active-state daemon crash.
 - Ports are chosen dynamically; an unrelated process may claim one between
   selection and bind. This is an explicit integration probe, not a deterministic
   default unit test.
-- Rust formatting, Clippy, and cargo tests do not apply yet: there is no
-  Cargo.toml or Rust implementation. Run the required checks when scaffolding
-  starts.
+- Rust formatting, Clippy, and cargo tests cover the application separately;
+  they do not replace this real-OpenSSH integration evidence.

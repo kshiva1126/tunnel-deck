@@ -52,11 +52,13 @@ the actual target OS limit. All clients and guardians use the same resolver.
 Never unlink an active runtime lock; temporary-directory cleanup and stale
 sockets must not create a second daemon while the old daemon/guardians live.
 
-The existing Python probe is Linux-only: its subreaper and `/proc` checks are
-test-harness facilities, not portable implementation requirements. A macOS
-test harness must verify guardian completion through explicit IPC and process
-ownership without copying those Linux-only assumptions. Native macOS lifecycle
-and real-SSH validation are required before claiming macOS support.
+The Python probe shares its OpenSSH protocol and guardian harness across Linux
+and macOS. Guardian completion uses explicit pipe IPC and observable listener
+and lock state; it does not use `/proc`, `prctl`, or subreapers. The macOS CI
+job runs it with Apple's `/usr/bin/ssh`. Native job evidence, release-artifact
+execution on both architectures, and human TUI/browser/install checks are still
+required before claiming release-verified macOS support; see
+[the macOS validation checklist](macos-validation.md).
 
 ## One private OpenSSH master per rule
 

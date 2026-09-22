@@ -35,3 +35,11 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Run tests
         run: cargo test --all-features
+      - name: Run isolated Apple OpenSSH integration probe
+        if: runner.os == 'macOS'
+        env:
+          PATH: /usr/bin:/bin:/usr/sbin:/sbin
+        run: |
+          sw_vers
+          uname -m
+          /usr/bin/python3 experiments/openssh_probe.py
