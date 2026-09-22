@@ -6,6 +6,8 @@ the remediation child receives only a bounded JSON context and no GitHub or
 SSH credentials.
 """
 
+import base64
+import binascii
 import hashlib
 import json
 import os
@@ -21,6 +23,7 @@ from gate import API_TIMEOUT, REPO, Refused, api, listing
 
 MAX_CONTEXT_BYTES = 48 * 1024
 MAX_LOG_BYTES = 12 * 1024
+MAX_CARGO_FILE_BYTES = 2 * 1024 * 1024
 DEFAULT_ATTEMPTS = 3
 DEFAULT_SECONDS = 2 * 60 * 60
 DEFAULT_POLL = 30
@@ -244,14 +247,142 @@ def failed_logs(failed):
     return summaries
 
 
-def risk_reason(pr_number):
+def repository_file(path, commit):
+    """Fetch one bounded repository file at an exact trusted commit."""
+    response = one(f"repos/{REPO}/contents/{path}?ref={commit}")
+    if (response.get("type") != "file" or response.get("name") != Path(path).name
+            or response.get("path") != path or response.get("encoding") != "base64"
+            or type(response.get("size")) is not int
+            or response["size"] < 1 or response["size"] > MAX_CARGO_FILE_BYTES
+            or not re.fullmatch(r"[0-9a-f]{40}", response.get("sha", ""))
+            or not isinstance(response.get("content"), str)
+            or len(response["content"]) > MAX_CARGO_FILE_BYTES * 2):
+        raise ReviewStopped("Cargo file response is missing, oversized, or invalid")
+    try:
+        encoded = "".join(response["content"].split())
+        content = base64.b64decode(encoded, validate=True)
+    except (ValueError, binascii.Error):
+        raise ReviewStopped("Cargo file response is missing, oversized, or invalid") from None
+    if len(content) != response["size"] or len(content) > MAX_CARGO_FILE_BYTES:
+        raise ReviewStopped("Cargo file response is missing, oversized, or invalid")
+    try:
+        return content.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ReviewStopped("Cargo file is not valid UTF-8") from None
+
+
+def lock_packages(document):
+    """Return Cargo's package identity set, rejecting ambiguous lock syntax."""
+    packages = []
+    current = None
+    in_dependencies = False
+    lock_version_seen = False
+    for raw in document.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line == "[[package]]":
+            if current is not None:
+                packages.append(current)
+            current = {}
+            in_dependencies = False
+            continue
+        if current is None:
+            if lock_version_seen or not re.fullmatch(r"version\s*=\s*[34]", line):
+                raise ReviewStopped("Cargo.lock is invalid or ambiguous")
+            lock_version_seen = True
+            continue
+        if in_dependencies:
+            if line == "]":
+                in_dependencies = False
+            elif not re.fullmatch(r'"(?:[^"\\]|\\.)*",?', line):
+                raise ReviewStopped("Cargo.lock is invalid or ambiguous")
+            continue
+        if re.fullmatch(r"dependencies\s*=\s*\[", line):
+            in_dependencies = True
+            continue
+        match = re.fullmatch(r'(name|version|source|checksum)\s*=\s*("(?:[^"\\]|\\.)*")', line)
+        if not match or match[1] in current:
+            raise ReviewStopped("Cargo.lock is invalid or ambiguous")
+        try:
+            current[match[1]] = json.loads(match[2])
+        except (ValueError, TypeError):
+            raise ReviewStopped("Cargo.lock is invalid or ambiguous") from None
+    if in_dependencies:
+        raise ReviewStopped("Cargo.lock is invalid or ambiguous")
+    if current is not None:
+        packages.append(current)
+    identities = []
+    for package in packages:
+        if ("name" not in package or "version" not in package
+                or any(not isinstance(value, str) or not value for value in package.values())):
+            raise ReviewStopped("Cargo.lock is invalid or ambiguous")
+        identities.append((package["name"], package["version"], package.get("source"),
+                           package.get("checksum")))
+    if not lock_version_seen or not identities or len(identities) != len(set(identities)):
+        raise ReviewStopped("Cargo.lock is invalid or ambiguous")
+    return set(identities)
+
+
+def manifest_dependency_additions(base, head):
+    """Allow only new, simple registry dependency declarations."""
+    base_lines = base.splitlines()
+    head_lines = head.splitlines()
+    base_index = 0
+    section = None
+    additions = []
+    dependency_section = re.compile(
+        r"\[(?:dev-|build-)?dependencies\]|\[target\.[^]]+\.(?:dev-|build-)?dependencies\]")
+    declaration = re.compile(r'([A-Za-z0-9_-]+)\s*=\s*"([^"\\]+)"(?:\s*#.*)?')
+    for raw in head_lines:
+        if base_index < len(base_lines) and raw == base_lines[base_index]:
+            base_index += 1
+            stripped = raw.strip()
+            if stripped.startswith("["):
+                section = stripped
+            continue
+        stripped = raw.strip()
+        if stripped.startswith("["):
+            section = stripped
+        match = declaration.fullmatch(stripped)
+        if not dependency_section.fullmatch(section or "") or not match:
+            return None
+        additions.append((match[1], match[2]))
+    if base_index != len(base_lines) or not additions or len({name for name, _ in additions}) != len(additions):
+        return None
+    return additions
+
+
+def cargo_risk(base_sha, head_sha, names):
+    base_lock = repository_file("Cargo.lock", base_sha)
+    head_lock = repository_file("Cargo.lock", head_sha)
+    base_packages = lock_packages(base_lock)
+    head_packages = lock_packages(head_lock)
+    if base_packages != head_packages:
+        return "Cargo.lock package identities changed"
+    if "Cargo.toml" in names:
+        additions = manifest_dependency_additions(
+            repository_file("Cargo.toml", base_sha), repository_file("Cargo.toml", head_sha))
+        if additions is None:
+            return "Cargo.toml changed outside simple dependency additions"
+        locked_names = {package[0] for package in head_packages}
+        if any(name not in locked_names for name, _version in additions):
+            return "Cargo.toml dependency addition is absent from Cargo.lock"
+    return None
+
+
+def risk_reason(pr_number, base_sha, head_sha):
     files = listing(f"repos/{REPO}/pulls/{pr_number}/files?per_page=100")
     if any(not isinstance(item, dict) or not isinstance(item.get("filename"), str)
            for item in files):
         raise ReviewStopped("GitHub returned invalid changed-file data")
     names = {item["filename"] for item in files}
-    if names & {"Cargo.toml", "Cargo.lock", "docs/architecture.md"}:
-        return "supply-chain or architecture-boundary files changed"
+    if "docs/architecture.md" in names:
+        return "architecture-boundary files changed"
+    if names & {"Cargo.toml", "Cargo.lock"}:
+        cargo = cargo_risk(base_sha, head_sha, names)
+        if cargo:
+            return cargo
     protected = ("src/ipc/", "src/config/", "src/daemon/process", "src/platform/private_fs")
     if any(name.startswith(protected) for name in names):
         return "storage, IPC, authentication, or process-policy files changed"
@@ -459,7 +590,7 @@ def run(workspace, number, pr_number):
         pr = expected_pr(number, pr_number)
         sha = pr["head"]["sha"]
         base_sha = pr["base"]["sha"]
-        risk = risk_reason(pr_number)
+        risk = risk_reason(pr_number, base_sha, sha)
         if risk:
             transition_issue(number, risk)
         blockers = open_dependencies(number)
