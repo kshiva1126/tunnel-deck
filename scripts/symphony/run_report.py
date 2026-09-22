@@ -84,7 +84,12 @@ def load_report(workspace, expected_number):
         raise ReportError("run report identity or status is invalid")
     for key in ("facts", "decisions", "alternatives", "tests", "unknowns"):
         if (not isinstance(report[key], list)
-                or any(not isinstance(item, (str, dict)) for item in report[key])):
+                or any(not isinstance(item, (str, dict))
+                       or (isinstance(item, dict)
+                           and any(not isinstance(mapping_key, str)
+                                   or not isinstance(mapping_value, str)
+                                   for mapping_key, mapping_value in item.items()))
+                       for item in report[key])):
             raise ReportError(f"run report {key} is invalid")
     execution = report["execution"]
     if (not isinstance(execution, dict)

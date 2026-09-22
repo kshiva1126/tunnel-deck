@@ -165,6 +165,13 @@ class RunReportTests(unittest.TestCase):
             report = json.loads(original)
             report[field] = value
             wrong_types.append(json.dumps(report))
+        for field, value in (("facts", "not-a-list"), ("decisions", [7]),
+                             ("alternatives", [{"reason": 7}]),
+                             ("tests", [{"command": None}]),
+                             ("unknowns", [{"risk": ["nested"]}])):
+            report = json.loads(original)
+            report[field] = value
+            wrong_types.append(json.dumps(report))
         cases = (
             original.replace('"issue_number": 26', '"issue_number": 27'),
             "{" + "x" * run_report.MAX_REPORT_BYTES,
