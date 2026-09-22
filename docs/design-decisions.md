@@ -348,3 +348,32 @@ isolation, Local/Remote/Dynamic forwarding with real traffic, conflicts,
 cancellation, and daemon-SIGKILL guardian cleanup. Native macOS execution
 remains tracked separately; the PR's macOS job validates this Rust path on a
 native runner without claiming a full release-machine acceptance test.
+
+### M3 terminal UI implementation
+
+The TUI remains an IPC client: the daemon owns desired rules and SSH attempts,
+and closing the terminal drops only client connections. The common form creates
+Local forwarding with both bind and destination addresses set to `127.0.0.1`;
+the remote port initially drives the local port. A local bind probe may offer
+the next available port, but only an explicit key accepts it. The daemon probes
+again at start, so a race is reported instead of silently changing the saved
+port or stopping another listener.
+
+An existing stopped rule is updated by sending its stable ID through the
+existing `forward_add` operation. The daemon treats that ID as an atomic
+replacement after validating the whole candidate rule set; an active rule
+rejects editing. This preserves the version 1 operation and payload shape while
+keeping the daemon the sole writer. Duplication uses a fresh UUID, and deletion
+retains a confirmation step.
+
+Terminal ownership is scoped by an RAII guard. Normal/error returns restore raw
+mode, alternate screen, and cursor; the panic hook restores them before the
+original panic reporter runs, and SIGINT/SIGTERM/SIGHUP request an orderly loop
+exit. Browser launching is isolated in `platform`, uses `xdg-open` on Linux and
+`open` on macOS, passes the displayed HTTP/HTTPS URL as one argument without a
+shell, and never guesses a protocol automatically.
+
+Ratatui 0.29, Crossterm 0.28, and signal-hook 0.3 were added from crates.io;
+their package manifests declare MIT-family compatible licensing and no
+third-party source or assets were copied. Native macOS terminal, signal, and
+browser behavior still requires post-publication validation.

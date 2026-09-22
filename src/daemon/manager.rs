@@ -92,7 +92,20 @@ impl DaemonManager {
                     .map_err(|error| (ErrorCode::InvalidRequest, error.to_string()))?;
                 let id = rule.id().as_uuid();
                 let mut next = state.rules.clone();
-                next.push(rule);
+                if let Some(existing) = next
+                    .iter_mut()
+                    .find(|existing| existing.id().as_uuid() == id)
+                {
+                    if state.running.contains_key(&id) {
+                        return Err((
+                            ErrorCode::Conflict,
+                            "an active rule cannot be edited".to_owned(),
+                        ));
+                    }
+                    *existing = rule;
+                } else {
+                    next.push(rule);
+                }
                 validate_rule_set(&next).map_err(|errors| {
                     let error = crate::config::StoreError::InvalidRules(errors);
                     (ErrorCode::Conflict, error.to_string())
@@ -466,6 +479,24 @@ mod tests {
         drop(manager);
         let reopened = DaemonManager::open(root.path()).unwrap();
         assert_eq!(reopened.state.lock().unwrap().rules.len(), 1);
+    }
+
+    #[test]
+    fn stopped_rule_can_be_edited_by_stable_id_but_active_rule_cannot() {
+        let root = private_tempdir();
+        let manager = DaemonManager::open(root.path()).unwrap();
+        let id = Uuid::new_v4();
+        let rule = |name: &str| json!({"kind":"dynamic","id":id,"name":name,"ssh_host_alias":"host","bind_address":"127.0.0.1","bind_port":1080,"auto_start":false,"reconnect":false});
+        result(manager.handle(&request(Operation::ForwardAdd, rule("proxy"))));
+        result(manager.handle(&request(Operation::ForwardAdd, rule("renamed"))));
+        let listed = result(manager.handle(&request(Operation::ForwardList, json!({}))));
+        assert_eq!(listed.as_array().unwrap().len(), 1);
+        assert_eq!(listed[0]["name"], "renamed");
+
+        result(manager.handle(&request(Operation::ForwardStart, json!({"rule_id":id}))));
+        let error = failure(manager.handle(&request(Operation::ForwardAdd, rule("not-saved"))));
+        assert_eq!(error.code, ErrorCode::Conflict);
+        assert!(error.message.contains("cannot be edited"));
     }
 
     #[test]

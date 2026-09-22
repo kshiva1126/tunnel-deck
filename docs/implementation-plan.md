@@ -281,6 +281,11 @@ Exit criteria:
 
 ## Milestone 3 — usable TUI
 
+Implementation status: the host selection to Local port workflow, dashboard,
+details, help, explicit browser actions, daemon event refresh, and terminal
+restoration are implemented for GH-7. Native macOS terminal/signal/browser
+validation and remote CI remain post-publication review conditions.
+
 Tasks:
 
 - Add terminal setup and restoration on normal exit, error, panic, and signal.
