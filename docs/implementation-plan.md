@@ -315,7 +315,8 @@ and a bounded rotation primitive are implemented in GH-8. Versioned settings
 persistence and UI/CLI settings were implemented in GH-42. GH-43 connects the
 configured log level and classified daemon start/fail/reconnect/stop events to
 the private bounded log, with unsafe rotation-path rejection and behavior
-coverage. The parent issue remains open pending integrated review.
+coverage. Integrated review across GH-42 and GH-43 completes the remaining GH-8
+acceptance criteria.
 
 GH-42 implements the settings follow-up with TOML schema v2, an explicit
 backup-first v1 migration, daemon-owned IPC get/update operations, CLI JSON and
