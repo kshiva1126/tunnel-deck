@@ -1,4 +1,4 @@
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 
 use std::{
     env,
@@ -56,12 +56,23 @@ enum Command {
         #[command(subcommand)]
         command: SettingsCommand,
     },
+    /// Generate shell completion to standard output
+    Completion(CompletionArgs),
+    /// Generate the tdeck(1) manual page to standard output
+    Manpage,
     /// Internal daemon commands
     #[command(hide = true)]
     Daemon {
         #[command(subcommand)]
         command: DaemonCommand,
     },
+}
+
+#[derive(Debug, Args)]
+struct CompletionArgs {
+    /// Shell whose completion script should be generated
+    #[arg(value_enum)]
+    shell: clap_complete::Shell,
 }
 
 #[derive(Debug, Subcommand)]
@@ -241,6 +252,16 @@ impl Cli {
                 }
                 SettingsCommand::Set(args) => update_settings(args, json_output),
             },
+            Some(Command::Completion(args)) => {
+                let mut command = Self::command();
+                clap_complete::generate(args.shell, &mut command, "tdeck", &mut std::io::stdout());
+                Ok(())
+            }
+            Some(Command::Manpage) => clap_mangen::Man::new(Self::command())
+                .render(&mut std::io::stdout())
+                .map_err(|error| {
+                    AppError::Configuration(format!("could not generate manual page: {error}"))
+                }),
             Some(Command::Daemon { command }) => match command {
                 DaemonCommand::Run => run_daemon(),
                 DaemonCommand::Guardian(args) => {
