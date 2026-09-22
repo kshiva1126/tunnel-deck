@@ -352,6 +352,28 @@ def git(workspace, *args):
         raise ReviewStopped("git validation failed") from None
 
 
+def create_bundle(workspace, commit, destination):
+    """Serialize the exact workspace HEAD without giving trusted Git its metadata."""
+    if git(workspace, "rev-parse", "HEAD") != commit:
+        raise ReviewStopped("workspace HEAD changed before trusted bundle creation")
+    try:
+        with Path(destination).open("wb") as output:
+            subprocess.run(agent_prefix() + ["git", "-C", str(workspace), "bundle",
+                           "create", "-", "HEAD"], env=credential_free_env(),
+                           stdout=output, stderr=subprocess.DEVNULL,
+                           timeout=60, check=True)
+        advertised = subprocess.run(["git", "bundle", "list-heads", str(destination)],
+                                    env=trusted_git_env(), text=True,
+                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                    timeout=30, check=True).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        raise ReviewStopped("trusted bundle creation failed") from None
+    if advertised != f"{commit} HEAD":
+        raise ReviewStopped("trusted bundle HEAD does not match validated commit")
+    if git(workspace, "rev-parse", "HEAD") != commit:
+        raise ReviewStopped("workspace HEAD changed during trusted bundle creation")
+
+
 def push(workspace, number, commit, expected_remote):
     """Stage in trusted metadata, then push with the credentialed parent."""
     control = Path(os.environ["SYMPHONY_CONTROL_ROOT"])
@@ -359,11 +381,7 @@ def push(workspace, number, commit, expected_remote):
         with tempfile.TemporaryDirectory(
                 prefix="trusted-push-", dir=os.environ["SYMPHONY_STATE_ROOT"]) as staging:
             bundle = Path(staging) / "source.bundle"
-            with bundle.open("wb") as output:
-                subprocess.run(agent_prefix() + ["git", "-C", str(workspace), "bundle",
-                               "create", "-", commit], env=credential_free_env(),
-                               stdout=output, stderr=subprocess.DEVNULL,
-                               timeout=60, check=True)
+            create_bundle(workspace, commit, bundle)
             bundle.chmod(0o600)
             subprocess.run(["git", "init", "--bare", staging], env=trusted_git_env(),
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
