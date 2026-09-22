@@ -122,9 +122,24 @@ PY
 python3 "$control_root/scripts/symphony/run_report.py" \
   publish "$workspace" "$issue_number" >/dev/null
 
-GH_TOKEN="$SYMPHONY_GITHUB_TOKEN" \
-  gh issue edit "$issue_number" --repo "$repo_slug" \
-  --remove-label agent-ready --add-label human-review
+if [ "${SYMPHONY_AUTO_REVIEW:-0}" = 1 ]; then
+  pr_number=${pr_url##*/}
+  set +e
+  python3 "$control_root/scripts/symphony/review.py" \
+    "$workspace" "$issue_number" "$pr_number"
+  review_status=$?
+  set -e
+  if [ "$review_status" -eq 2 ]; then
+    trap - EXIT HUP INT TERM
+    printf 'Published pull request; automated review stopped for human review: %s\n' "$pr_url"
+    exit 0
+  fi
+  [ "$review_status" -eq 0 ] || false
+else
+  GH_TOKEN="$SYMPHONY_GITHUB_TOKEN" \
+    gh issue edit "$issue_number" --repo "$repo_slug" \
+    --remove-label agent-ready --add-label human-review
+fi
 
 trap - EXIT HUP INT TERM
 printf 'Published pull request: %s\n' "$pr_url"

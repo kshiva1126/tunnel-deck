@@ -56,7 +56,8 @@ specifications and design decisions.
 See [the contribution workflow](CONTRIBUTING.md#issue-to-pr-workflow) for
 AI-assisted exploration, reviewable changes, verification, and code walkthroughs.
 The optional [Symphony workflow](docs/symphony.md) can turn a labeled GitHub
-Issue into an isolated Codex run and a pull request for human review.
+Issue into an isolated Codex run, remediate its pull request, and safely merge
+ordinary successful work; documented exceptional cases stop for human review.
 
 - [Product specification](docs/product-spec.md)
 - [Architecture](docs/architecture.md)

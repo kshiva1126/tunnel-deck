@@ -90,6 +90,7 @@ container_id=$(docker run --detach --rm --init \
   --env "SYMPHONY_AGENT_UID=$host_uid" \
   --env "SYMPHONY_AGENT_GID=$host_gid" \
   --env "SYMPHONY_STATE_ROOT=/state" \
+  --env "SYMPHONY_AUTO_REVIEW=1" \
   --publish "127.0.0.1:$port:4001" \
   --mount "type=bind,src=$control_root,dst=/control,readonly" \
   --mount "type=bind,src=$workspace_root,dst=/workspaces" \
