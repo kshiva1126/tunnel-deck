@@ -32,6 +32,7 @@ if [ -z "${SYMPHONY_GITHUB_TOKEN:-}" ]; then
 fi
 
 export SYMPHONY_CONTROL_ROOT="$control_root"
+export SYMPHONY_AUTO_REVIEW=1
 export SYMPHONY_WORKSPACE_ROOT="${SYMPHONY_WORKSPACE_ROOT:-$HOME/.local/share/symphony/tunnel-deck/workspaces}"
 
 logs_root=${SYMPHONY_LOGS_ROOT:-$HOME/.local/state/symphony/tunnel-deck/logs}

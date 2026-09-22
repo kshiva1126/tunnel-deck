@@ -4,7 +4,9 @@ This repository can run an opt-in local Symphony worker for GitHub Issues.
 Symphony watches open issues carrying the `agent-ready` label, creates an
 isolated workspace and branch, and starts Codex after trusted admission checks. A host-side
 hook publishes a pull request only after the agent has committed its work and
-all required Rust checks pass.
+all required Rust checks pass. The same trusted hook then monitors required
+GitHub Actions and CodeRabbit, performs bounded remediation on that one PR, and
+squash-merges the exact verified head in the ordinary success case.
 
 ## One-time setup
 
@@ -81,9 +83,85 @@ retain the credential so they can clone,
 push the prepared branch, open a pull request, and move the issue from
 `agent-ready` to `human-review`.
 
-Review the diff, CI, and acceptance criteria before merging. The generated pull
-request uses `Refs #N`, so merge does not automatically close an issue whose
-full acceptance criteria still need manual confirmation.
+The generated pull request uses `Refs #N`. The trusted review driver closes the
+Issue explicitly only after the merge and final acceptance revalidation; a
+stopped or partial result remains open with `human-review`.
+
+## Automated review, remediation, and merge (GH-28)
+
+[`scripts/symphony/review.py`](../scripts/symphony/review.py) is the state owner
+after PR publication. Both launchers set `SYMPHONY_AUTO_REVIEW=1`; the ordinary
+test hook can leave it unset to exercise publication alone. The driver accepts
+only an open PR in `kshiva1126/tunnel-deck` whose base is `main`, head is
+`symphony/issue-N`, body links the same Issue, and head repository is not a
+fork. Initial admission still rejects **all** PR history and therefore cannot
+replay old work: only the trusted post-publication call carries the PR number
+into review mode.
+
+In Docker, `after_run.sh` publishes and verifies the workspace as the unprivileged
+workspace owner, then returns to its root-owned trusted parent for `/state` and
+GitHub operations. Codex and all workspace commands are explicitly dropped back
+to the configured agent UID/GID; the remediation context is made readable only
+to that identity. Pushes use the fixed repository URL, disable repository hooks
+and credential helpers, and obtain the token only through the trusted askpass
+helper. This keeps agent-controlled Git configuration outside the credential
+boundary while preserving root-owned retry state.
+
+The required check names default to `ubuntu-latest,macos-latest,CodeRabbit`
+(the current CI matrix job names) and may be changed
+as one comma-separated trusted launcher setting in `SYMPHONY_REQUIRED_CHECKS`.
+Missing, queued, or running checks wait; a completed result other than success,
+neutral, or skipped is a failure. CodeRabbit review threads are fetched through
+GitHub GraphQL. Pagination beyond the bounded first 100 threads/comments fails
+closed instead of silently overlooking a finding.
+
+For a failed check, only the check name and bounded check-run title/summary are
+included. For CodeRabbit, only the unresolved finding body, path, line, and
+commit SHA are included. This JSON is explicitly marked untrusted, capped at
+48 KiB, scanned for credential-like data, written mode 0600, and removed after
+the turn. `codex exec` receives that file and the existing workspace, but its
+environment has `SYMPHONY_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN`, and
+`SSH_AUTH_SOCK` removed. Codex never pushes or calls GitHub: the trusted parent
+requires a new clean commit, runs the three local Rust checks, scans the whole
+PR diff for credentials, and pushes to the existing branch.
+
+The default bounds are three remediation commits and two hours total, polling
+every 30 seconds. Trusted operators may set `SYMPHONY_REMEDIATION_ATTEMPTS`,
+`SYMPHONY_REVIEW_SECONDS`, and `SYMPHONY_REVIEW_POLL_SECONDS`; host and Docker
+use the same code and defaults. Start time, PR identity, attempt count, and the
+last failure fingerprint are stored mode 0600 beside the existing trusted gate
+records, so a hook/process restart cannot reset either bound. An identical
+failure fingerprint on the next head stops immediately, so a repeated external
+effect is not attempted. The review record is removed only after a verified
+merge and Issue close; manual recovery may remove it only while the worker is
+stopped and after inspecting the still-open PR.
+
+Immediately before merge the driver re-fetches the PR identity and exact head
+SHA, native Issue dependencies, every required check, and unresolved review
+threads. It sends squash merge with that verified SHA, re-fetches the PR to
+prove a merge commit exists, and only then closes the source Issue. A new head,
+failed check, dependency, unresolved thread, malformed/partial response,
+timeout, permission failure, or unknown merge result fails closed. Dependency,
+Cargo supply-chain, architecture, IPC/storage/process-policy, host-key weakening,
+destructive-migration, and credential-like changes stop at `human-review`
+instead of being auto-merged.
+
+### Stops and manual recovery
+
+The driver moves exceptional work out of `agent-ready`, adds `human-review`,
+and exits nonzero. This includes exhausted attempt/time bounds, a repeated
+finding, API/auth/schema ambiguity, mismatched branch/repository/SHA/state,
+open dependencies, risky policy boundaries, unsafe diagnostic content, failed
+local validation, or an unverifiable merge. The source Issue's single marked
+run-report comment remains the review and recovery record; do not delete PR
+history to re-admit it through the initial gate.
+
+An operator should inspect the current PR head, required checks, review threads,
+dependencies, and the sanitized hook diagnostic. Resolve the cause on the
+existing PR or record the owner decision on the Issue. If automation is to be
+resumed, stop the worker first, preserve the workspace, clear only the matching
+trusted stop/permit state as described below, restore the intended queue label,
+and restart the same launcher. Never bypass the exact-SHA final revalidation.
 
 ## Decision report on the source Issue (GH-26)
 

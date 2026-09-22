@@ -24,7 +24,8 @@ hooks:
     python3 "$SYMPHONY_CONTROL_ROOT/scripts/symphony/gate.py" before "$PWD"
   after_run: |
     python3 "$SYMPHONY_CONTROL_ROOT/scripts/symphony/gate.py" after "$PWD"
-  timeout_ms: 1200000
+  # Includes the bounded post-publication CI/review monitor (default: 2h).
+  timeout_ms: 7500000
 
 agent:
   max_concurrent_agents: 1

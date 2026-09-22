@@ -208,7 +208,7 @@ def main():
             permit.touch(mode=0o600)
         else:
             # Protect against lost label updates / stale tracker snapshots.
-            stopped.write_text("published; human review required\n")
+            stopped.write_text("published; lifecycle complete; operator recovery required\n")
         return 0
     except Refused as error:
         stop(root, number, str(error))
