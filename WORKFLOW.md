@@ -31,6 +31,7 @@ agent:
   max_turns: 1
 
 codex:
+  # Shared host/Docker launcher pins the model; see docs/symphony.md.
   command: '"$SYMPHONY_CONTROL_ROOT/scripts/symphony/codex.sh"'
   approval_policy: never
   thread_sandbox: danger-full-access
