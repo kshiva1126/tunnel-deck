@@ -40,6 +40,7 @@ USER worker
 WORKDIR /workspaces
 
 ENV HOME=/home/worker \
+    CARGO_HOME=/home/worker/.cargo \
     SYMPHONY_INSTALL_DIR=/tmp/symphony-runtime \
     SYMPHONY_CONTROL_ROOT=/control \
     SYMPHONY_WORKSPACE_ROOT=/workspaces
