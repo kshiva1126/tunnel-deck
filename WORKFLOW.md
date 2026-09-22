@@ -66,5 +66,10 @@ message. Do not push, create a pull request, change labels, or close the issue;
 the host-side publishing hook handles those actions without exposing GitHub
 credentials to the agent.
 
+Remote Linux/macOS CI cannot run until that hook publishes the pull request.
+Do not treat the absence of pre-publication remote CI as a blocker: when the
+implementation is complete and the three local Rust checks above pass, commit
+the work. Remote CI remains a human-review condition after publication.
+
 If the work is incomplete or blocked, do not create a commit. Leave a concise
 final explanation with the failing criterion or required owner decision.
