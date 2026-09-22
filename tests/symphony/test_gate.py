@@ -49,7 +49,9 @@ if name == "gh":
             (root / "fixture.json").write_text(json.dumps(config))
             sys.exit(0)
         assert "--paginate" in args and "--slurp" in args
-        if config.get("malformed") == kind:
+        if config.get("deeply_nested") == kind:
+            print("[" * 2000 + '"synthetic-secret-do-not-log"' + "]" * 2000)
+        elif config.get("malformed") == kind:
             print("{synthetic-secret-do-not-log")
         else:
             print(json.dumps(config[kind]))
@@ -200,6 +202,16 @@ class HookTests(unittest.TestCase):
                 self.config["dependencies"] = [[bad]]
                 self.save()
                 self.assert_blocked()
+                self.clear_stop()
+
+    def test_excessive_json_nesting_latches_and_suppresses_retries(self):
+        for kind in ("issue", "dependencies", "prs"):
+            with self.subTest(kind=kind):
+                self.config["deeply_nested"] = kind
+                self.save()
+                before = self.assert_blocked()
+                self.assertNotIn("Traceback", before.stderr)
+                self.assertIn("invalid data", before.stderr)
                 self.clear_stop()
 
     def test_invalid_issue_number_fails_closed(self):

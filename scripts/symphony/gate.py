@@ -39,7 +39,9 @@ def api(endpoint, method="GET", body=None):
         if not isinstance(pages, list) or not pages:
             raise ValueError()
         return pages
-    except (OSError, subprocess.SubprocessError, ValueError):
+    except (OSError, subprocess.SubprocessError, ValueError, RecursionError):
+        # Excessively nested JSON raises RecursionError rather than ValueError;
+        # route it through the same durable stop as other unusable responses.
         # Never include CLI stderr, response text, or environment values.
         raise Refused("GitHub API failed, timed out, or returned invalid data") from None
 

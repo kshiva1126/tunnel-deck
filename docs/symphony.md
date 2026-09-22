@@ -112,7 +112,9 @@ automatic reruns do not update previously published PRs. This deliberately
 trades automatic PR follow-up for protection against replaying merged work.
 API errors, inaccessible dependencies, missing permissions, timeouts, unknown
 states, and invalid/incomplete responses all refuse admission. Validation
-also rejects non-integer issue numbers, including JSON floating-point values
+includes JSON nesting beyond the decoder's limit: this also persists a stop
+record so a malformed response cannot cause repeated API calls on retries.
+Validation also rejects non-integer issue numbers, including JSON floating-point values
 that compare equal to the requested number. Diagnostics
 contain fixed reasons and validated dependency repository/issue identifiers,
 never issue titles/bodies, API response text, CLI stderr, or token values.
@@ -270,3 +272,10 @@ before/after hooks now have regression coverage for durable stop records,
 consumed permits, sanitized diagnostics, and retries without external effects.
 No live GitHub writes, native dependency E2E, Docker runtime test, or
 remote Linux/macOS CI were run in this agent workspace.
+
+JSON decoder failure follow-up: all 24 harness tests and the three required
+Rust checks passed on the same Linux environment. Excessively nested responses
+from the issue, dependency, and PR endpoints reproduced repeated API calls
+before the fix. They now create stop records, suppress Codex and publication,
+and halt redispatch without repeated external calls or response-text disclosure.
+The native E2E and platform verification limits above still apply.
