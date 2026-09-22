@@ -457,7 +457,9 @@ fn handle_key(app: &mut App, key: KeyEvent, service: &Service, catalog: &mut Hos
             KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % 3,
             KeyCode::BackTab | KeyCode::Up => form.field = (form.field + 2) % 3,
             KeyCode::Backspace => form.backspace(),
-            KeyCode::Char('a') if form.suggestion.is_some() => form.accept_suggestion(),
+            KeyCode::Char('a') if form.field != 0 && form.suggestion.is_some() => {
+                form.accept_suggestion()
+            }
             KeyCode::Char(ch) => form.input(ch),
             KeyCode::Enter => {
                 if let Some(payload) = form.payload() {
@@ -815,6 +817,31 @@ mod tests {
         assert!(form.payload().is_none());
         form.accept_suggestion();
         assert!(form.payload().is_none(), "name remains required")
+    }
+    #[test]
+    fn suggestion_shortcut_does_not_consume_a_in_the_name_field() {
+        let listener = TcpListener::bind((LOOPBACK, 0)).unwrap();
+        let mut app = App::default();
+        let mut form = Form::new("dev".into());
+        form.local_port = listener.local_addr().unwrap().port().to_string();
+        form.suggestion = Some(3001);
+        app.form = Some(form);
+        let service = Service {
+            socket: PathBuf::new(),
+            executable: PathBuf::new(),
+        };
+        let mut catalog = HostCatalog::new(PathBuf::new(), PathBuf::new(), "ssh");
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+            &service,
+            &mut catalog,
+        );
+
+        let form = app.form.expect("form remains open");
+        assert_eq!(form.name, "a");
+        assert!(form.suggestion.is_some());
     }
     #[test]
     fn selection_survives_event_refresh_by_rule_id() {

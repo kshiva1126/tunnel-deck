@@ -13,7 +13,11 @@ pub fn command_for(platform: super::Platform, url: &str) -> Command {
 
 /// Launch the platform browser without involving a shell.
 pub fn open(url: &str) -> io::Result<()> {
-    command_for(super::CURRENT, url).spawn().map(|_| ())
+    let mut child = command_for(super::CURRENT, url).spawn()?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
 }
 
 #[cfg(test)]
