@@ -1,0 +1,34 @@
+schema_version = 1
+
+[[rules]]
+id = "018f6ba0-3be8-7c42-9f1f-61b99fc2e076"
+name = "database"
+ssh_host_alias = "production"
+kind = "local"
+bind_address = "127.0.0.1"
+bind_port = 5433
+destination_host = "127.0.0.1"
+destination_port = 5432
+auto_start = false
+reconnect = false
+[[rules]]
+id = "1402c9cc-f9f1-493f-ad20-e1a807166b07"
+name = "preview"
+ssh_host_alias = "staging"
+kind = "remote"
+bind_address = "127.0.0.1"
+bind_port = 8080
+destination_host = "127.0.0.1"
+destination_port = 3000
+auto_start = false
+reconnect = false
+
+[[rules]]
+id = "571eeb62-e7ab-436b-a736-8d217bc545b1"
+name = "browser-proxy"
+ssh_host_alias = "jump"
+kind = "dynamic"
+bind_address = "127.0.0.1"
+bind_port = 1080
+auto_start = false
+reconnect = false

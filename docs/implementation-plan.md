@@ -4,6 +4,11 @@ This document turns the product specification and architecture into an
 implementation sequence. It defines the initial compatibility contracts before
 code is written and keeps each milestone small enough to verify independently.
 
+Execution is tracked in the [GitHub Issues roadmap](https://github.com/kshiva1126/tunnel-deck/issues/13).
+Use its linked issues for current progress, dependencies, and completion checks.
+Keep this document as the design/milestone reference and update both when scope
+changes. Begin implementation with issue #1.
+
 ## Decisions for the initial implementation
 
 Use the following defaults unless the repository owner explicitly changes
@@ -24,9 +29,10 @@ them before the affected milestone starts:
 6. **Make the daemon the only configuration writer.** CLI and TUI clients
    perform mutations through IPC so concurrent writes cannot diverge.
 
-The repository owner must choose the project license before Milestone 0 is
-complete. Do not copy third-party code or assets until their licenses have been
-verified and all required notices can be preserved.
+The project uses MIT; see `LICENSE` and `CONTRIBUTING.md`. The accepted
+[design decisions](design-decisions.md) specify SSH control, readiness, crash
+cleanup, and defaults. Do not copy third-party code or assets until their
+licenses have been verified and all required notices can be preserved.
 
 ## Version 1 compatibility contracts
 
@@ -52,7 +58,7 @@ bind_port = 5433
 destination_host = "127.0.0.1"
 destination_port = 5432
 auto_start = false
-reconnect = true
+reconnect = false
 ```
 
 The forwarding variants are:
@@ -124,21 +130,12 @@ and persisted references should always include the UUID.
 
 ### OpenSSH command construction
 
-Spawn OpenSSH directly with an argument vector and never through a shell. The
-managed invocation should explicitly prevent OpenSSH configuration from
-forking or reusing an unobservable master process. A typical Local invocation
-is conceptually:
-
-```text
-ssh -N -T
-    -o ExitOnForwardFailure=yes
-    -o BatchMode=yes
-    -o ClearAllForwardings=yes
-    -o ControlMaster=no
-    -o ForkAfterAuthentication=no
-    -L <forward-spec>
-    <host-alias>
-```
+Spawn OpenSSH directly with an argument vector and never through a shell.
+Use one foreground private master per rule attempt, then add the forwarding
+through `ssh -O forward`. Follow the exact two-stage construction in
+[design decisions](design-decisions.md#one-private-openssh-master-per-rule).
+Never combine `ClearAllForwardings=yes` with the requested `-L`, `-R`, or `-D`
+in one invocation. Never reuse the user's control socket.
 
 Do not add options that weaken host-key verification. Preserve the configured
 host alias so OpenSSH continues to apply the user's `Host`, `Include`,
@@ -146,11 +143,10 @@ host alias so OpenSSH continues to apply the user's `Host`, `Include`,
 configuration as user-controlled input and ensure logs do not expose sensitive
 arguments or environment values.
 
-Place each child in a process group that TunnelDeck can terminate as one unit.
-Attempt graceful termination first, wait for a bounded period, and force
-termination only as a fallback. Design daemon-crash behavior so an unmanaged
-tunnel is not silently left behind, and do not signal a process based only on
-a stale numeric PID.
+Use the guardian, lease, process-group, and inherited-lock design in
+[crash cleanup](design-decisions.md#daemon-crash-cleanup). Confirm forwarding
+acceptance before reporting Active. Verify these semantics with real OpenSSH
+before completing Milestone 2.
 
 ### Host discovery
 
@@ -183,6 +179,7 @@ src/
 │   └── process.rs
 ├── ipc/
 ├── config/
+├── platform/
 └── logging/
 ```
 
@@ -191,6 +188,11 @@ serialization where practical. UI code must call application operations
 through the same IPC service as the CLI and must never own SSH children.
 
 ## Milestone 0 — scaffold and freeze contracts
+
+Implementation status: complete on the Issue #1 branch pending review and CI.
+The scaffold uses Rust 1.85 / edition 2024. Initial platform baselines are Linux
+kernel 5.15 with glibc 2.35 and macOS 13. These baselines may only be widened
+after native compatibility checks; release artifacts are not yet available.
 
 Tasks:
 
@@ -201,8 +203,11 @@ Tasks:
 - Implement the Clap command definitions without claiming unfinished tunnel
   behavior.
 - Add serde types and fixtures for configuration and IPC version 1.
-- Select and add the project license and contribution policy.
-- Add a minimal Linux CI workflow that runs formatting, Clippy, and tests.
+- Set Cargo package license to `MIT`; retain the existing license and
+  contribution policy.
+- Select minimum Linux/macOS versions and a compatible Rust toolchain before
+  freezing dependencies. Record macOS deployment targets explicitly.
+- Add Linux and macOS CI jobs that run formatting, Clippy, and tests.
 
 Exit criteria:
 
@@ -219,7 +224,7 @@ Tasks:
 - Validate names, addresses, port ranges, required fields, and duplicate local
   listeners with structured errors.
 - Implement the named runtime-state transitions independently of processes.
-- Resolve XDG paths with documented fallbacks and restrictive permissions.
+- Resolve Linux/macOS paths and XDG overrides with restrictive permissions.
 - Load and atomically save versioned TOML with migration infrastructure.
 - Discover explicit SSH host aliases and resolve their effective settings via
   `ssh -G`.
@@ -240,7 +245,12 @@ Tasks:
   and event subscriptions.
 - Add race-safe on-demand daemon startup and enforce one daemon per user.
 - Locate and validate the OpenSSH executable.
-- Build Local forwarding arguments without a shell.
+- Build the private master and Local control-forward arguments without a shell.
+- Verify the two-stage OpenSSH design and guardian crash cleanup in an isolated
+  integration environment, including Remote and Dynamic protocol probes.
+- Run native lifecycle and control-forward integration checks on Linux and
+  macOS, including Apple's system SSH. Replace Linux-specific probe harness
+  assumptions; cross-compilation alone does not validate process behavior.
 - Supervise the SSH process group, detect early listener failure, retain a
   bounded stderr diagnostic, and implement graceful/forced shutdown.
 - Expose create, list, start, stop, status, and delete through the CLI.
@@ -262,6 +272,9 @@ Tasks:
 - Add terminal setup and restoration on normal exit, error, panic, and signal.
 - Implement the dashboard, host browser, type-aware rule form, confirmation
   dialog, diagnostics view, settings, and contextual help.
+- Prioritize host selection -> remote port entry -> local address display and
+  explicit browser opening. Offer a user-selected alternative for occupied
+  local ports, retaining startup-time conflict detection.
 - Subscribe to daemon events rather than polling on every rendered frame.
 - Preserve selection across updates and provide a useful small-terminal
   fallback.
@@ -299,8 +312,10 @@ Exit criteria:
 
 Tasks:
 
-- Produce reproducible Linux `x86_64` and `aarch64` artifacts and checksums.
-- Define the minimum supported Linux environment and linkage strategy.
+- Produce Linux `x86_64`/`aarch64` and macOS Intel/Apple Silicon artifacts and
+  checksums. Verify linkage and minimum OS versions selected at Milestone 0.
+- Define and test macOS signing/notarization and installation handling before
+  public distribution; do not instruct users to disable Gatekeeper globally.
 - Add shell completions, man pages, and upgrade documentation.
 - Optionally add a systemd user unit without making it mandatory.
 - Audit dependency licenses and preserve required third-party notices.
@@ -309,10 +324,10 @@ Tasks:
 
 Exit criteria:
 
-- A fresh user can install one binary and complete every MVP acceptance
+- A fresh user on either OS can install its binary and complete every MVP acceptance
   criterion from the product specification.
 - Installation and upgrade are documented and reproducible.
-- Release artifacts pass smoke tests on both supported architectures.
+- Release artifacts pass native smoke tests on all four OS/architecture targets.
 
 ## Test matrix and completion checks
 
@@ -346,7 +361,7 @@ account.
 
 ## First implementation session
 
-1. Confirm the project license.
+1. Apply the accepted design decisions and MIT license metadata.
 2. Implement only Milestone 0.
 3. Review the committed configuration and IPC fixtures before building the
    daemon against them.
