@@ -1,7 +1,7 @@
 //! Daemon-owned desired configuration and idempotent runtime intent.
 
 use crate::{
-    config::{ConfigStore, ConfigV1, Rule as WireRule},
+    config::{ConfigStore, ConfigV2, Rule as WireRule, Settings},
     daemon::{
         lifecycle::RequestHandler,
         process::{self, DiagnosticKind, ManagedAttempt},
@@ -25,6 +25,7 @@ use uuid::Uuid;
 struct State {
     store: ConfigStore,
     rules: Vec<Rule>,
+    settings: Settings,
     running: HashMap<Uuid, Attempt>,
     diagnostics: HashMap<Uuid, RuntimeInfo>,
     manually_stopped: HashSet<Uuid>,
@@ -61,12 +62,18 @@ struct ProcessSettings {
 
 impl DaemonManager {
     pub fn open(config_directory: &Path) -> Result<Self, crate::config::StoreError> {
-        let store = ConfigStore::open(config_directory)?;
-        let rules = store.load()?.unwrap_or_default();
+        let mut store = ConfigStore::open(config_directory)?;
+        let persisted = store
+            .load_or_migrate_v1()?
+            .unwrap_or(crate::config::PersistedConfig {
+                rules: vec![],
+                settings: Settings::default(),
+            });
         Ok(Self {
             state: Mutex::new(State {
                 store,
-                rules,
+                rules: persisted.rules,
+                settings: persisted.settings,
                 running: HashMap::new(),
                 diagnostics: HashMap::new(),
                 manually_stopped: HashSet::new(),
@@ -131,7 +138,9 @@ impl DaemonManager {
         })?;
         match request.operation {
             Operation::ForwardList => Ok(serde_json::to_value(
-                ConfigV1::from_domain(&state.rules).map_err(internal)?.rules,
+                ConfigV2::from_domain(&state.rules, state.settings.clone())
+                    .map_err(internal)?
+                    .rules,
             )
             .map_err(internal)?),
             Operation::ForwardAdd => {
@@ -159,7 +168,11 @@ impl DaemonManager {
                     let error = crate::config::StoreError::InvalidRules(errors);
                     (ErrorCode::Conflict, error.to_string())
                 })?;
-                state.store.save(&next).map_err(internal)?;
+                let settings = state.settings.clone();
+                state
+                    .store
+                    .save_config(&next, &settings)
+                    .map_err(internal)?;
                 state.rules = next;
                 self.events
                     .publish("configuration_changed", json!({"rule_id": id}));
@@ -183,7 +196,11 @@ impl DaemonManager {
                 if next.len() == before {
                     return Err((ErrorCode::NotFound, "rule was not found".to_owned()));
                 }
-                state.store.save(&next).map_err(internal)?;
+                let settings = state.settings.clone();
+                state
+                    .store
+                    .save_config(&next, &settings)
+                    .map_err(internal)?;
                 state.rules = next;
                 self.events
                     .publish("configuration_changed", json!({"rule_id": id}));
@@ -194,6 +211,22 @@ impl DaemonManager {
             }
             Operation::ForwardStop => {
                 unreachable!("stop is dispatched without holding the state lock")
+            }
+            Operation::SettingsGet => serde_json::to_value(&state.settings).map_err(internal),
+            Operation::SettingsUpdate => {
+                let settings: Settings =
+                    serde_json::from_value(request.payload.clone()).map_err(invalid)?;
+                let rules = state.rules.clone();
+                state
+                    .store
+                    .save_config(&rules, &settings)
+                    .map_err(internal)?;
+                state.settings = settings;
+                self.events.publish(
+                    "settings_changed",
+                    serde_json::to_value(&state.settings).map_err(internal)?,
+                );
+                serde_json::to_value(&state.settings).map_err(internal)
             }
             Operation::Status => {
                 let active = state
@@ -786,5 +819,26 @@ mod tests {
         );
         manager.maintain();
         assert!(!manager.state.lock().unwrap().running.contains_key(&id));
+    }
+
+    #[test]
+    fn settings_update_is_atomic_and_restored_after_reopen() {
+        let root = private_tempdir();
+        let manager = DaemonManager::open(root.path()).unwrap();
+        let desired = json!({"theme":"dark","log_level":"debug","default_reconnect":true,"default_auto_start":true});
+        assert_eq!(
+            result(manager.handle(&request(Operation::SettingsUpdate, desired.clone()))),
+            desired
+        );
+        drop(manager);
+
+        let reopened = DaemonManager::open(root.path()).unwrap();
+        assert_eq!(
+            result(reopened.handle(&request(Operation::SettingsGet, json!({})))),
+            desired
+        );
+        let saved = std::fs::read_to_string(root.path().join("config.toml")).unwrap();
+        let parsed: ConfigV2 = toml::from_str(&saved).unwrap();
+        assert_eq!(serde_json::to_value(parsed.settings).unwrap(), desired);
     }
 }

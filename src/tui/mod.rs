@@ -2,7 +2,7 @@
 
 use crate::{
     application::hosts::HostCatalog,
-    config::Rule as WireRule,
+    config::{LogLevel, Rule as WireRule, Settings, Theme},
     daemon::lifecycle,
     domain::rule::{Rule, RuleId},
     error::AppError,
@@ -49,6 +49,7 @@ enum Page {
     Dashboard,
     Hosts,
     Detail,
+    Settings,
     Help,
 }
 
@@ -313,6 +314,8 @@ struct App {
     form: Option<Form>,
     confirm_delete: Option<Uuid>,
     message: String,
+    settings: Settings,
+    settings_field: usize,
     quit: bool,
 }
 impl Default for App {
@@ -327,6 +330,8 @@ impl Default for App {
             form: None,
             confirm_delete: None,
             message: "Tab: 画面切替  ?: ヘルプ  q: 終了".into(),
+            settings: Settings::default(),
+            settings_field: 0,
             quit: false,
         }
     }
@@ -414,6 +419,15 @@ impl Service {
         }
         Ok(rules)
     }
+    fn load_settings(&self) -> Result<Settings, String> {
+        serde_json::from_value(self.call(Operation::SettingsGet, json!({}))?)
+            .map_err(|error| error.to_string())
+    }
+    fn save_settings(&self, settings: &Settings) -> Result<Settings, String> {
+        let payload = serde_json::to_value(settings).map_err(|error| error.to_string())?;
+        serde_json::from_value(self.call(Operation::SettingsUpdate, payload)?)
+            .map_err(|error| error.to_string())
+    }
 }
 
 pub fn run() -> Result<(), AppError> {
@@ -431,6 +445,10 @@ pub fn run() -> Result<(), AppError> {
     match service.load_rules() {
         Ok(v) => app.replace_rules(v),
         Err(e) => app.message = e,
+    }
+    match service.load_settings() {
+        Ok(settings) => app.settings = settings,
+        Err(error) => app.message = error,
     }
     let stopping = Arc::new(AtomicBool::new(false));
     let mut signals = signal_hook::iterator::Signals::new([SIGINT, SIGTERM, SIGHUP])
@@ -496,6 +514,9 @@ fn refresh(app: &mut App, service: &Service) {
     match service.load_rules() {
         Ok(v) => app.replace_rules(v),
         Err(e) => app.message = e,
+    }
+    if let Ok(settings) = service.load_settings() {
+        app.settings = settings;
     }
 }
 
@@ -574,15 +595,60 @@ fn handle_key(app: &mut App, key: KeyEvent, service: &Service, catalog: &mut Hos
             app.page = match app.page {
                 Page::Dashboard => Page::Hosts,
                 Page::Hosts => Page::Detail,
-                Page::Detail => Page::Help,
+                Page::Detail => Page::Settings,
+                Page::Settings => Page::Help,
                 Page::Help => Page::Dashboard,
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') if app.page == Page::Settings => {
+            app.settings_field = (app.settings_field + 1) % 4
+        }
+        KeyCode::Up | KeyCode::Char('k') if app.page == Page::Settings => {
+            app.settings_field = (app.settings_field + 3) % 4
+        }
+        KeyCode::Left | KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ')
+            if app.page == Page::Settings =>
+        {
+            let previous = app.settings.clone();
+            match app.settings_field {
+                0 => {
+                    app.settings.theme = match app.settings.theme {
+                        Theme::System => Theme::Dark,
+                        Theme::Dark => Theme::Light,
+                        Theme::Light => Theme::System,
+                    }
+                }
+                1 => {
+                    app.settings.log_level = match app.settings.log_level {
+                        LogLevel::Error => LogLevel::Warn,
+                        LogLevel::Warn => LogLevel::Info,
+                        LogLevel::Info => LogLevel::Debug,
+                        LogLevel::Debug => LogLevel::Trace,
+                        LogLevel::Trace => LogLevel::Error,
+                    }
+                }
+                2 => app.settings.default_reconnect = !app.settings.default_reconnect,
+                _ => app.settings.default_auto_start = !app.settings.default_auto_start,
+            }
+            match service.save_settings(&app.settings) {
+                Ok(settings) => {
+                    app.settings = settings;
+                    app.message = "設定を保存しました".into();
+                }
+                Err(error) => {
+                    app.settings = previous;
+                    app.message = error;
+                }
             }
         }
         KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
         KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
         KeyCode::Enter if app.page == Page::Hosts => {
             if let Some(host) = app.hosts.get(app.selected_host).cloned() {
-                app.form = Some(Form::new(host))
+                let mut form = Form::new(host);
+                form.auto_start = app.settings.default_auto_start;
+                form.reconnect = app.settings.default_reconnect;
+                app.form = Some(form)
             }
         }
         KeyCode::Enter if app.page == Page::Dashboard => app.page = Page::Detail,
@@ -662,7 +728,7 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
             Constraint::Length(2),
         ])
         .split(area);
-    let titles = ["ダッシュボード", "ホスト", "詳細", "ヘルプ"]
+    let titles = ["ダッシュボード", "ホスト", "詳細", "設定", "ヘルプ"]
         .into_iter()
         .map(Line::from)
         .collect::<Vec<_>>();
@@ -670,7 +736,8 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
         Page::Dashboard => 0,
         Page::Hosts => 1,
         Page::Detail => 2,
-        Page::Help => 3,
+        Page::Settings => 3,
+        Page::Help => 4,
     };
     frame.render_widget(
         Tabs::new(titles)
@@ -683,7 +750,7 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
             ),
         chunks[0],
     );
-    match app.page{Page::Dashboard=>render_dashboard(frame,chunks[1],app),Page::Hosts=>render_hosts(frame,chunks[1],app),Page::Detail=>render_detail(frame,chunks[1],app),Page::Help=>frame.render_widget(Paragraph::new("j/k・↑/↓ 選択  Enter 詳細/決定  Space 起動/停止\nn 新規  e 編集  c 複製  d 削除  r ホスト更新\nh HTTP  s HTTPS  Tab 画面切替  q 終了（転送は継続）").wrap(Wrap{trim:false}).block(Block::default().title("ヘルプ").borders(Borders::ALL)),chunks[1])}
+    match app.page{Page::Dashboard=>render_dashboard(frame,chunks[1],app),Page::Hosts=>render_hosts(frame,chunks[1],app),Page::Detail=>render_detail(frame,chunks[1],app),Page::Settings=>render_settings(frame,chunks[1],app),Page::Help=>frame.render_widget(Paragraph::new("j/k・↑/↓ 選択  Enter 詳細/決定  Space 起動/停止\nn 新規  e 編集  c 複製  d 削除  r ホスト更新\nh HTTP  s HTTPS  Tab 画面切替  q 終了（転送は継続）").wrap(Wrap{trim:false}).block(Block::default().title("ヘルプ").borders(Borders::ALL)),chunks[1])}
     frame.render_widget(Paragraph::new(app.message.as_str()), chunks[2]);
     if let Some(form) = &app.form {
         render_form(frame, area, form)
@@ -691,6 +758,30 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
     if app.confirm_delete.is_some() {
         render_confirm(frame, area)
     }
+}
+fn render_settings(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
+    let marker = |field| {
+        if app.settings_field == field {
+            ">"
+        } else {
+            " "
+        }
+    };
+    let text = format!(
+        "{} テーマ: {:?}\n{} ログレベル: {:?}\n{} 新規ルールの再接続: {}\n{} 新規ルールの自動起動: {}\n\n↑/↓: 項目選択  Enter/Space/←/→: 変更して保存",
+        marker(0),
+        app.settings.theme,
+        marker(1),
+        app.settings.log_level,
+        marker(2),
+        app.settings.default_reconnect,
+        marker(3),
+        app.settings.default_auto_start
+    );
+    frame.render_widget(
+        Paragraph::new(text).block(Block::default().title("設定").borders(Borders::ALL)),
+        area,
+    );
 }
 fn render_dashboard(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     let rows = app.rules.iter().enumerate().map(|(i, r)| {
@@ -974,6 +1065,28 @@ mod tests {
                 .draw(|frame| render(frame, &App::default()))
                 .unwrap();
         }
+    }
+    #[test]
+    fn settings_page_renders_the_daemon_values() {
+        let mut app = App {
+            page: Page::Settings,
+            ..App::default()
+        };
+        app.settings.theme = Theme::Dark;
+        app.settings.log_level = LogLevel::Debug;
+        app.settings.default_reconnect = true;
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("Dark"));
+        assert!(text.contains("Debug"));
     }
     #[test]
     fn ipv6_urls_are_bracketed() {

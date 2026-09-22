@@ -49,6 +49,8 @@ pub enum Operation {
     ForwardRemove,
     ForwardStart,
     ForwardStop,
+    SettingsGet,
+    SettingsUpdate,
     Status,
     Subscribe,
 }

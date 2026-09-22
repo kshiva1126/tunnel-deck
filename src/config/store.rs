@@ -1,4 +1,4 @@
-use super::{ConfigV1, SCHEMA_VERSION};
+use super::{ConfigV1, ConfigV2, SCHEMA_VERSION, Settings};
 use crate::{
     domain::{rule::Rule, validation::ValidationError},
     platform::private_fs::PrivateDirectory,
@@ -31,13 +31,19 @@ pub enum StoreError {
 /// The caller must only supply a migration for a documented older schema.
 pub trait Migration {
     fn source_version(&self) -> u32;
-    fn migrate(&self, original: &str) -> Result<ConfigV1, StoreError>;
+    fn migrate(&self, original: &str) -> Result<ConfigV2, StoreError>;
 }
 
-/// Persistence boundary for the future sole writer (the daemon). Opening a
-/// store does not confer a daemon lock; clients must not use it for mutations.
+/// Persistence boundary for the sole writer (the daemon). Opening a store does
+/// not confer a daemon lock; clients must not use it for mutations.
 pub struct ConfigStore {
     directory: PrivateDirectory,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PersistedConfig {
+    pub rules: Vec<Rule>,
+    pub settings: Settings,
 }
 
 impl ConfigStore {
@@ -58,14 +64,41 @@ impl ConfigStore {
     }
 
     pub fn load(&self) -> Result<Option<Vec<Rule>>, StoreError> {
+        Ok(self.load_config()?.map(|config| config.rules))
+    }
+
+    pub fn load_config(&self) -> Result<Option<PersistedConfig>, StoreError> {
         self.read_original()?.map(|text| decode(&text)).transpose()
     }
 
     pub fn save(&mut self, rules: &[Rule]) -> Result<(), StoreError> {
-        let text = toml::to_string_pretty(&ConfigV1::from_domain(rules)?)?;
+        let settings = self
+            .load_config()?
+            .map(|config| config.settings)
+            .unwrap_or_default();
+        self.save_config(rules, &settings)
+    }
+
+    pub fn save_config(&mut self, rules: &[Rule], settings: &Settings) -> Result<(), StoreError> {
+        let text = toml::to_string_pretty(&ConfigV2::from_domain(rules, settings.clone())?)?;
         // Never silently overwrite unknown schemas or invalid existing data.
-        self.load()?;
+        self.load_config()?;
         self.replace(text.as_bytes(), |_| Ok(()))
+    }
+
+    pub fn load_or_migrate_v1(&mut self) -> Result<Option<PersistedConfig>, StoreError> {
+        struct V1Migration;
+        impl Migration for V1Migration {
+            fn source_version(&self) -> u32 {
+                1
+            }
+            fn migrate(&self, original: &str) -> Result<ConfigV2, StoreError> {
+                let legacy: ConfigV1 = toml::from_str(original)?;
+                let rules = legacy.into_domain()?;
+                ConfigV2::from_domain(&rules, Settings::default())
+            }
+        }
+        self.load_with_migration(&V1Migration)
     }
 
     /// Backup is created exclusively and synced before invoking migration.
@@ -73,7 +106,7 @@ impl ConfigStore {
     pub fn load_with_migration(
         &mut self,
         migration: &dyn Migration,
-    ) -> Result<Option<Vec<Rule>>, StoreError> {
+    ) -> Result<Option<PersistedConfig>, StoreError> {
         let Some(original) = self.read_original()? else {
             return Ok(None);
         };
@@ -91,10 +124,10 @@ impl ConfigStore {
         backup.file.sync_all()?;
         self.directory.sync()?;
         backup.keep = true;
-        let rules = migration.migrate(&original)?.into_domain()?;
-        let text = toml::to_string_pretty(&ConfigV1::from_domain(&rules)?)?;
+        let (rules, settings) = migration.migrate(&original)?.into_domain()?;
+        let text = toml::to_string_pretty(&ConfigV2::from_domain(&rules, settings.clone())?)?;
         self.replace(text.as_bytes(), |_| Ok(()))?;
-        Ok(Some(rules))
+        Ok(Some(PersistedConfig { rules, settings }))
     }
 
     fn read_original(&self) -> Result<Option<String>, StoreError> {
@@ -175,12 +208,13 @@ fn schema(text: &str) -> Result<u32, StoreError> {
     }
     Ok(toml::from_str::<Header>(text)?.schema_version)
 }
-fn decode(text: &str) -> Result<Vec<Rule>, StoreError> {
+fn decode(text: &str) -> Result<PersistedConfig, StoreError> {
     let version = schema(text)?;
     if version != SCHEMA_VERSION {
         return Err(StoreError::UnsupportedSchema(version));
     }
-    toml::from_str::<ConfigV1>(text)?.into_domain()
+    let (rules, settings) = toml::from_str::<ConfigV2>(text)?.into_domain()?;
+    Ok(PersistedConfig { rules, settings })
 }
 
 #[cfg(test)]
@@ -197,7 +231,10 @@ mod tests {
         os::unix::fs::{PermissionsExt, symlink},
     };
     fn fixture() -> Vec<Rule> {
-        decode(include_str!("../../tests/fixtures/config_v1.toml")).unwrap()
+        toml::from_str::<ConfigV1>(include_str!("../../tests/fixtures/config_v1.toml"))
+            .unwrap()
+            .into_domain()
+            .unwrap()
     }
     fn entries(path: &Path) -> usize {
         fs::read_dir(path).unwrap().count()
@@ -217,9 +254,12 @@ mod tests {
             .with_policy(true, true);
         store.save(&rules).unwrap();
         assert_eq!(store.load().unwrap(), Some(rules.clone()));
-        let dto: ConfigV1 =
+        let dto: ConfigV2 =
             toml::from_str(&fs::read_to_string(path.join("config.toml")).unwrap()).unwrap();
-        assert_eq!(dto, ConfigV1::from_domain(&rules).unwrap());
+        assert_eq!(
+            dto,
+            ConfigV2::from_domain(&rules, Settings::default()).unwrap()
+        );
         assert_eq!(
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o700
@@ -299,7 +339,7 @@ mod tests {
         let mut store = ConfigStore::open(root.path()).unwrap();
         store.save(&fixture()).unwrap();
         assert!(matches!(
-            store.replace(b"schema_version = 1\n", |at| if at == Stage::Renamed {
+            store.replace(b"schema_version = 2\n", |at| if at == Stage::Renamed {
                 Err(io::Error::other("sync failure"))
             } else {
                 Ok(())
@@ -361,11 +401,11 @@ mod tests {
         fn source_version(&self) -> u32 {
             0
         }
-        fn migrate(&self, _: &str) -> Result<ConfigV1, StoreError> {
+        fn migrate(&self, _: &str) -> Result<ConfigV2, StoreError> {
             if self.fail {
                 return Err(io::Error::other("migration failed").into());
             }
-            ConfigV1::from_domain(&fixture())
+            ConfigV2::from_domain(&fixture(), Settings::default())
         }
     }
     #[test]
@@ -396,6 +436,52 @@ mod tests {
     }
 
     #[test]
+    fn registered_v1_migration_adds_default_settings_and_preserves_exact_backup() {
+        let root = private_tempdir();
+        let original = include_bytes!("../../tests/fixtures/config_v1.toml");
+        let mut store = ConfigStore::open(root.path()).unwrap();
+        store.replace(original, |_| Ok(())).unwrap();
+
+        let migrated = store.load_or_migrate_v1().unwrap().unwrap();
+
+        assert_eq!(migrated.rules, fixture());
+        assert_eq!(migrated.settings, Settings::default());
+        let saved = fs::read_to_string(root.path().join("config.toml")).unwrap();
+        assert!(saved.starts_with("schema_version = 2\n"));
+        let backup = fs::read_dir(root.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "bak"))
+            .unwrap();
+        assert_eq!(fs::read(backup).unwrap(), original);
+    }
+
+    #[test]
+    fn invalid_v1_migration_keeps_original_and_backup() {
+        let root = private_tempdir();
+        let original = include_str!("../../tests/fixtures/config_v1.toml")
+            .replace("bind_port = 1080", "bind_port = 0");
+        let mut store = ConfigStore::open(root.path()).unwrap();
+        store.replace(original.as_bytes(), |_| Ok(())).unwrap();
+
+        assert!(matches!(
+            store.load_or_migrate_v1(),
+            Err(StoreError::InvalidRule(ValidationError::PortZero { .. }))
+        ));
+
+        assert_eq!(
+            fs::read_to_string(root.path().join("config.toml")).unwrap(),
+            original
+        );
+        let backup = fs::read_dir(root.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "bak"))
+            .unwrap();
+        assert_eq!(fs::read_to_string(backup).unwrap(), original);
+    }
+
+    #[test]
     fn invalid_migration_output_preserves_original_and_backup_exists_before_conversion() {
         struct InvalidMigration<'a> {
             directory: &'a Path,
@@ -405,7 +491,7 @@ mod tests {
                 0
             }
 
-            fn migrate(&self, original: &str) -> Result<ConfigV1, StoreError> {
+            fn migrate(&self, original: &str) -> Result<ConfigV2, StoreError> {
                 let backups: Vec<_> = fs::read_dir(self.directory)
                     .unwrap()
                     .map(|entry| entry.unwrap().path())
@@ -418,11 +504,16 @@ mod tests {
                     original
                 );
                 // Syntactically valid DTO output must still pass domain validation.
-                Ok(toml::from_str(
+                let legacy: ConfigV1 = toml::from_str(
                     &include_str!("../../tests/fixtures/config_v1.toml")
                         .replace("bind_port = 1080", "bind_port = 0"),
                 )
-                .unwrap())
+                .unwrap();
+                Ok(ConfigV2 {
+                    schema_version: SCHEMA_VERSION,
+                    rules: legacy.rules,
+                    settings: Settings::default(),
+                })
             }
         }
 
@@ -481,15 +572,15 @@ mod tests {
     fn future_schema_is_not_migrated_or_backed_up() {
         let root = private_tempdir();
         let mut store = ConfigStore::open(root.path()).unwrap();
-        store.replace(b"schema_version = 2\n", |_| Ok(())).unwrap();
+        store.replace(b"schema_version = 3\n", |_| Ok(())).unwrap();
         assert!(matches!(
             store.load_with_migration(&TestMigration { fail: false }),
-            Err(StoreError::UnsupportedSchema(2))
+            Err(StoreError::UnsupportedSchema(3))
         ));
         assert_eq!(entries(root.path()), 1);
         assert_eq!(
             fs::read(root.path().join("config.toml")).unwrap(),
-            b"schema_version = 2\n"
+            b"schema_version = 3\n"
         );
     }
 
