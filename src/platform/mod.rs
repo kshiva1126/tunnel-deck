@@ -18,3 +18,6 @@ pub const CURRENT: Platform = Platform::MacOs;
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 compile_error!("TunnelDeck currently supports Linux and macOS only");
+
+pub mod paths;
+pub(crate) mod private_fs;

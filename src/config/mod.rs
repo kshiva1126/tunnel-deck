@@ -3,6 +3,10 @@
 use serde::{Deserialize, Deserializer, Serialize, de};
 use uuid::Uuid;
 
+mod conversion;
+mod store;
+pub use store::{ConfigStore, Migration, StoreError};
+
 pub const SCHEMA_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -77,7 +81,11 @@ mod tests {
         assert_eq!(config.rules.len(), 3);
         assert!(matches!(config.rules[2], Rule::Dynamic { .. }));
 
-        let encoded = toml::to_string_pretty(&config).expect("serialize configuration");
+        let domain = config.clone().into_domain().expect("valid domain rules");
+        let converted = ConfigV1::from_domain(&domain).unwrap();
+        assert_eq!(converted, config);
+
+        let encoded = toml::to_string_pretty(&converted).expect("serialize configuration");
         let reparsed: ConfigV1 = toml::from_str(&encoded).expect("round-trip configuration");
         assert_eq!(reparsed, config);
 

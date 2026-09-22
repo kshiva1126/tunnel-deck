@@ -196,3 +196,58 @@ spike covering all three forwarding types, configured extra forwards, an
 existing user master, Remote rejection, and guardian crash cleanup. A fake SSH
 alone cannot validate OpenSSH control semantics. Keep this a separate explicit
 integration check; ordinary unit tests remain offline.
+
+### M1 configuration persistence implementation
+
+`ConfigV1` now converts through the existing validated domain constructors and
+rule-set validation. `ConfigStore` owns an open private directory descriptor;
+file access, replacement, and cleanup are relative to it using portable Unix
+`openat`/`renameat`/`unlinkat`. It is not a daemon lock. M2 must acquire the sole
+writer lock before using mutation or abandoned-save cleanup APIs; CLI/TUI
+execution paths remain unavailable in this change.
+
+The path resolver takes explicit home/XDG inputs and a target platform instead
+of reading process-global environment in tests. Relative config/state overrides
+are ignored. A runtime override must be absolute, owned, non-symlink, and 0700;
+otherwise the documented OS fallback applies. Application directories and files
+are rejected when their existing permissions are unsafe, never repaired. File
+access rejects symlinks, non-regular files, and multiple hard links. Ancestors
+such as HOME, Library, and XDG roots are caller-selected infrastructure, not
+application directories to chmod; newly created directories use 0700.
+
+Saving validates before writing, creates an exclusive UUID temporary file at
+0600, writes/flushes/fsyncs it, renames, then syncs the directory. Unknown or
+invalid existing configurations are not overwritten. Failures before rename
+retain the previous file and attempt to remove the temporary. A directory-sync
+failure after rename reports `DurabilityUncertain`: the replacement is already
+visible and rollback is not promised. Process death can leave private temporary
+files; they are never loaded or reused. The sole writer may explicitly discard
+an abandoned save by UUID once no live writer owns it, rather than scanning and
+deleting another writer's files automatically.
+
+Migration is an explicit interface, with no invented historical schema shipped.
+Unknown versions are rejected by default, including all future schemas even
+when a migration is supplied. A registered older-schema migration first writes
+and syncs a unique 0600 backup of the exact original bytes and syncs its directory,
+then converts and validates before atomic replacement. Migration failures retain
+the original and the completed backup. Tests use a synthetic migration only.
+
+The direct `libc` dependency and test-only `tempfile` dependency are dual
+MIT/Apache-2.0 licensed according to their package manifests. No third-party
+source or assets were copied; dependency packages retain their license files.
+Native macOS verification remains required; Linux tests of macOS path selection
+do not establish native filesystem behavior.
+
+GH-19 local verification (2026-09-22): Linux x86_64, Rust 1.85.0;
+`cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`,
+and `cargo test --all-features` pass (47 unit tests, 3 CLI tests, doc-tests).
+Migration tests also verify that the backup exists before conversion begins and
+invalid domain output preserves both the original configuration and its backup.
+Filesystem tests force an actual rename failure and verify that abandoned-save
+cleanup rejects symlinks without removing them or modifying the configuration.
+The installed `/usr/local/cargo/bin` was added to PATH so rustdoc could run.
+All configuration tests use temporary directories; platform-default tests only
+construct paths. Linux/macOS GitHub CI has not run for these working-tree
+changes, and native macOS remains unverified. Remote Linux/macOS CI is a
+post-publication human-review condition; the local checks permit committing
+this implementation but do not mark the issue complete.
