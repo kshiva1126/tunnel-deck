@@ -55,6 +55,8 @@ Issues own progress and acceptance checks; the documents below retain detailed
 specifications and design decisions.
 See [the contribution workflow](CONTRIBUTING.md#issue-to-pr-workflow) for
 AI-assisted exploration, reviewable changes, verification, and code walkthroughs.
+The optional [Symphony workflow](docs/symphony.md) can turn a labeled GitHub
+Issue into an isolated Codex run and a pull request for human review.
 
 - [Product specification](docs/product-spec.md)
 - [Architecture](docs/architecture.md)
