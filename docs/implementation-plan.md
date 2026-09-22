@@ -369,6 +369,14 @@ notarization remain release-owner work.
 render these CLI materials. Their package metadata declares MIT OR Apache-2.0,
 and no third-party source or assets were copied.
 
+Implementation status: GH-55 makes every target build extract and natively run
+the distribution archive before aggregation. The final uploaded archive is
+retested after its passed smoke evidence is embedded; aggregation and tag
+publication reject missing or failed evidence. This covers version/help,
+completion, and manpage generation only. Signing, notarization, Gatekeeper,
+real SSH/TUI operation, and macOS 13/Intel hardware acceptance remain outside
+this automated boundary and continue under GH-51.
+
 Tasks:
 
 - Produce Linux `x86_64`/`aarch64` and macOS Intel/Apple Silicon artifacts and

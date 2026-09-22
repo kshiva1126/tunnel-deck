@@ -6,14 +6,16 @@ README intentionally keeps only the shortest route here.
 ## Supported targets and current limitations
 
 TunnelDeck targets Linux `x86_64`/`aarch64` and macOS Intel/Apple Silicon,
-with the baselines listed in the README. Linux is the current local validation
-environment. macOS support is still under validation; see the
-[native validation checklist](macos-validation.md). In particular, macOS 13,
-Intel, and the eventual release artifacts have not yet completed native smoke
-tests.
+with the baselines listed in the README. Release automation natively checks that
+each packaged executable renders version/help, completion, and manpage output.
+Broader macOS support is still under validation; see the
+[native validation checklist](macos-validation.md). In particular, macOS 13 and
+Intel hardware acceptance, signing/notarization, Gatekeeper, real SSH, and TUI
+checks remain pending.
 
 Release archives are named `tunnel-deck-<version>-<target>.tar.gz`. Each
-contains a same-named directory with `tdeck`, `LICENSE`, and `release.json`.
+contains a same-named directory with `tdeck`, `LICENSE`,
+`THIRD_PARTY_LICENSES.txt`, and `release.json`.
 The Release also provides `SHA256SUMS` and `release-manifest.json`. Select the
 target for your operating system and CPU; do not substitute an archive for
 another architecture.
@@ -77,8 +79,8 @@ TunnelDeck is currently unsigned and not notarized. Gatekeeper can therefore
 block the downloaded executable. Inspect the Release source and checksum, then
 use Finder's per-application **Open** confirmation or the corresponding
 per-file approval in System Settings if you trust it. Do not disable
-Gatekeeper globally. Distribution signing/notarization and native artifact
-smoke tests remain release work.
+Gatekeeper globally. Distribution signing/notarization and broader native
+acceptance checks remain release work.
 
 Update using the same stop, verify, and replacement sequence as Linux.
 

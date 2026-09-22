@@ -68,14 +68,16 @@ obtain the four deterministic archives, `SHA256SUMS`, and
 `release-manifest.json`.
 
 The manifest records the target triple, dynamic-linking model, minimum OS,
-build result, and packaged-artifact native-smoke status separately. A successful
-build is not a native execution claim. Native smoke tests of the packaged
-artifacts on every distribution target remain separate release acceptance work.
-Tag runs create a GitHub Release only after all four outputs and checksums have
-been validated. Every archive also includes TunnelDeck's `LICENSE` and the
+build result, and packaged-artifact native-smoke status separately. Every target
+archive is extracted on its matching native runner and its final `tdeck` runs
+version/help plus completion and manpage generation before aggregation. Tag runs
+create a GitHub Release only after all four smoke records, outputs, and checksums
+have been validated. Every archive also includes TunnelDeck's `LICENSE` and the
 locked dependency notices in `THIRD_PARTY_LICENSES.txt`; the pre-publication
 evidence and remaining risks are recorded in the
-[release audit](docs/release-audit.md).
+[release audit](docs/release-audit.md). Signing, notarization, Gatekeeper, real
+SSH/TUI behavior, and minimum-version hardware acceptance are separate release
+checks.
 
 ## Install and get started
 

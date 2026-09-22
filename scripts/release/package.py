@@ -62,6 +62,40 @@ def add_file(archive: tarfile.TarFile, source: Path, name: str, mode: int, epoch
         archive.addfile(info, stream)
 
 
+def write_archive(
+    archive_path: Path,
+    stem: str,
+    binary: Path,
+    license_path: Path,
+    third_party_licenses_path: Path,
+    metadata: dict,
+    epoch: int,
+) -> None:
+    """Write the deterministic archive used by both packaging and native smoke."""
+    with tempfile.TemporaryDirectory() as temporary:
+        staged = Path(temporary) / "release.json"
+        staged.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        with archive_path.open("wb") as raw:
+            with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=epoch) as zipped:
+                with tarfile.open(fileobj=zipped, mode="w", format=tarfile.USTAR_FORMAT) as archive:
+                    add_file(archive, license_path, f"{stem}/LICENSE", 0o644, epoch)
+                    add_file(
+                        archive,
+                        third_party_licenses_path,
+                        f"{stem}/THIRD_PARTY_LICENSES.txt",
+                        0o644,
+                        epoch,
+                    )
+                    add_file(archive, staged, f"{stem}/release.json", 0o644, epoch)
+                    add_file(archive, binary, f"{stem}/tdeck", 0o755, epoch)
+
+
+def write_sidecars(archive_path: Path, metadata_path: Path, checksum_path: Path, metadata: dict) -> None:
+    """Keep archive metadata byte-equivalent to its machine-readable sidecar."""
+    metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    checksum_path.write_text(f"{sha256(archive_path)}  {archive_path.name}\n", encoding="ascii")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--target", required=True)
@@ -95,31 +129,20 @@ def main() -> None:
         "minimum_os": args.minimum_os,
         "linkage": args.linkage,
         "linkage_evidence": link_evidence,
+        "archive": archive_path.name,
         "build": {"status": "passed", "rust": "1.85.0", "source_revision": args.source_revision},
         "native_smoke_test": smoke,
     }
-
-    with tempfile.TemporaryDirectory() as temporary:
-        staged = Path(temporary) / "release.json"
-        staged.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        with archive_path.open("wb") as raw:
-            with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=args.source_date_epoch) as zipped:
-                with tarfile.open(fileobj=zipped, mode="w", format=tarfile.USTAR_FORMAT) as archive:
-                    add_file(archive, Path("LICENSE"), f"{stem}/LICENSE", 0o644, args.source_date_epoch)
-                    add_file(
-                        archive,
-                        Path("THIRD_PARTY_LICENSES.txt"),
-                        f"{stem}/THIRD_PARTY_LICENSES.txt",
-                        0o644,
-                        args.source_date_epoch,
-                    )
-                    add_file(archive, staged, f"{stem}/release.json", 0o644, args.source_date_epoch)
-                    add_file(archive, args.binary, f"{stem}/tdeck", 0o755, args.source_date_epoch)
-
-    metadata["archive"] = archive_path.name
-    metadata["sha256"] = sha256(archive_path)
-    metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    checksum_path.write_text(f"{metadata['sha256']}  {archive_path.name}\n", encoding="ascii")
+    write_archive(
+        archive_path,
+        stem,
+        args.binary,
+        Path("LICENSE"),
+        Path("THIRD_PARTY_LICENSES.txt"),
+        metadata,
+        args.source_date_epoch,
+    )
+    write_sidecars(archive_path, metadata_path, checksum_path, metadata)
 
 
 if __name__ == "__main__":

@@ -39,8 +39,8 @@ not the macOS 13 minimum or the shipped release artifact.
 
 | Architecture | Minimum/native OS | Automated Rust + Apple SSH | Release artifact smoke test |
 | --- | --- | --- | --- |
-| Apple Silicon (`aarch64`) | macOS 13 pending; 26.6.2 native | Pass (`319158b`) | Pending |
-| Intel (`x86_64`) | macOS 13 | Pending native result | Pending |
+| Apple Silicon (`aarch64`) | macOS 13 pending; 26.6.2 native | Pass (`319158b`) | Automated CLI archive smoke; human checks pending |
+| Intel (`x86_64`) | macOS 13 | Pending minimum/hardware result | Automated CLI archive smoke; human checks pending |
 
 ## Human release-candidate checks
 
@@ -61,6 +61,7 @@ Do not put SSH credentials or private configuration in the record.
 - Stop all rules and the daemon, then confirm guardians, SSH children, sockets,
   attempt directories, and the inherited lock are cleaned up.
 
-These checks are currently pending. Therefore neither architecture has a
-recorded release-artifact execution result, and macOS support remains under
-validation rather than release-verified.
+These checks are currently pending. Automated archive smoke covers only
+version/help, completion, and manpage generation on current Actions native
+runners; it does not satisfy this human/minimum-OS matrix. macOS support remains
+under validation rather than release-verified.

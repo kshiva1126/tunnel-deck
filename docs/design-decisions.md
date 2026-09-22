@@ -80,10 +80,21 @@ manifest in a fixed target order.
 Pull requests and manual dispatches run the complete build and aggregation
 without release-write permission. Only a `v*` tag enables final GitHub Release
 publication. Action references use immutable commit IDs. Release evidence keeps
-`build.status` and `native_smoke_test.status` separate; this slice records the
-packaged-artifact native smoke as `not_run`. Ordinary native CI or a cross-build
-does not upgrade that field. Native distribution smoke on all four targets,
-macOS 13/Intel acceptance, signing, and notarization remain later M5 work.
+`build.status` and `native_smoke_test.status` separate. Each native build job
+extracts a candidate archive and runs its `tdeck` with `--version`, `--help`,
+Bash completion generation, and manpage generation. Only after those checks
+pass does it embed a machine-readable `passed` record containing the target,
+runner OS/architecture, source revision, and individual checks. Because that
+record changes the archive, the job extracts and runs the final archive again
+before allowing upload. Archive `release.json` and the per-target JSON sidecar
+are byte-equivalent; a separate checksum sidecar avoids a self-referential
+archive digest. Aggregation rejects any target without passed evidence, so pull
+requests and tags use the same gate and smoke failure prevents publication.
+
+This smoke proves only that the packaged CLI starts and renders static
+command-derived output on the four current native runners. Signing,
+notarization, Gatekeeper, the macOS 13 minimum, real SSH traffic, and interactive
+TUI behavior remain separate release acceptance work.
 
 ### M5 release audit and notices
 
