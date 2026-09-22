@@ -60,6 +60,7 @@ pub enum ImportClassification {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UnsupportedReason {
     UnixSocket,
+    RemoteDynamic,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -208,6 +209,10 @@ fn parse_forward(kind: DirectiveKind, value: &str) -> Result<ImportForwarding, P
                 destination_host,
                 destination_port,
             })
+        }
+        (DirectiveKind::Remote, [listen]) => {
+            parse_listener(listen)?;
+            Err(ParseFailure::Unsupported(UnsupportedReason::RemoteDynamic))
         }
         (DirectiveKind::Dynamic, [listen]) => {
             let (bind_address, bind_port) = parse_listener(listen)?;
@@ -412,7 +417,7 @@ mod tests {
         let preview = preview_effective_forwards("sample", &output, &existing, &[id(1)]).unwrap();
 
         assert_eq!(existing, before);
-        assert_eq!(preview.candidates.len(), 10);
+        assert_eq!(preview.candidates.len(), 12);
         assert!(matches!(
             preview.candidates[0].classification,
             ImportClassification::Supported
@@ -448,18 +453,30 @@ mod tests {
         ));
         assert!(matches!(
             preview.candidates[7].classification,
-            ImportClassification::Invalid {
-                reason: InvalidReason::Port
+            ImportClassification::Unsupported {
+                reason: UnsupportedReason::RemoteDynamic
             }
         ));
         assert!(matches!(
             preview.candidates[8].classification,
             ImportClassification::Invalid {
-                reason: InvalidReason::BindAddress
+                reason: InvalidReason::Port
             }
         ));
         assert!(matches!(
             preview.candidates[9].classification,
+            ImportClassification::Invalid {
+                reason: InvalidReason::BindAddress
+            }
+        ));
+        assert!(matches!(
+            preview.candidates[10].classification,
+            ImportClassification::Invalid {
+                reason: InvalidReason::DestinationHost
+            }
+        ));
+        assert!(matches!(
+            preview.candidates[11].classification,
             ImportClassification::Invalid {
                 reason: InvalidReason::Syntax
             }
@@ -488,5 +505,13 @@ mod tests {
             preview.candidates[1].forwarding,
             Some(ImportForwarding::Remote { ref bind_address, .. }) if bind_address == "0.0.0.0"
         ));
+    }
+
+    #[test]
+    fn non_utf8_effective_output_is_a_typed_error() {
+        assert_eq!(
+            preview_effective_forwards("sample", &[0xff], &[], &[]),
+            Err(InvalidReason::NonUtf8Output)
+        );
     }
 }

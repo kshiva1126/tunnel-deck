@@ -384,13 +384,13 @@ alias; they do not consume a local listener. An exact existing rule reports
 whether its supplied ID is currently running, without inspecting or changing
 daemon state.
 
-Unix-domain forwarding is classified as unsupported because TunnelDeck's
-versioned rule model contains TCP ports only; guessing a TCP mapping or changing
-storage/IPC would violate this slice. Missing fields, zero/out-of-range ports,
-invalid bind addresses, invalid destination hosts, and non-UTF-8 query output
-are invalid with fixed typed reasons. The preview retains no raw diagnostic and
-does not log expanded effective values, which may contain sensitive paths or
-endpoints.
+Unix-domain forwarding and destination-less RemoteForward (remote SOCKS) are
+classified as unsupported because TunnelDeck's versioned rule model cannot
+represent them; guessing a mapping or changing storage/IPC would violate this
+slice. Missing fields, zero/out-of-range ports, invalid bind addresses, invalid
+destination hosts, and non-UTF-8 query output are invalid with fixed typed
+reasons. The preview retains no raw diagnostic and does not log expanded
+effective values, which may contain sensitive paths or endpoints.
 
 ### M2 daemon IPC foundation implementation
 

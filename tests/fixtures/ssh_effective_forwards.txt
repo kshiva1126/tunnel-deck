@@ -5,6 +5,8 @@ localforward [127.0.0.1]:3000 [::1]:80
 dynamicforward [0.0.0.0]:3000
 localforward [::1]:3001 [example.com]:81
 localforward /tmp/local.sock /tmp/remote.sock
+remoteforward 9000
 dynamicforward 0
 dynamicforward [not-an-address]:1081
+localforward 3002 [bad:host]:80
 remoteforward missing-destination
