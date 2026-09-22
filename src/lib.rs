@@ -1,7 +1,7 @@
 //! TunnelDeck application library.
 //!
-//! Host discovery and the daemon IPC foundation are available. OpenSSH tunnel
-//! process supervision remains deliberately unavailable until later work.
+//! Host discovery, daemon IPC, and guardian-owned OpenSSH process supervision
+//! are available. The terminal UI remains deliberately unavailable.
 
 pub mod application;
 pub mod cli;

@@ -138,6 +138,20 @@ actual OpenSSH process ownership remains in the later forwarding slice.
 Subscriptions receive monotonically numbered events through a 64-event queue;
 a subscriber is removed when its queue fills or its socket disconnects.
 
+### Implemented OpenSSH process ownership
+
+The daemon starts a private guardian for each requested rule attempt. It passes
+one socketpair lease and a clone of the locked daemon file description, then
+waits for the guardian to report whether `ssh -O forward` was accepted. A
+cancellable Starting marker lets a concurrent stop suppress delayed success.
+
+The guardian owns the foreground private master and its attempt directory. It
+restores close-on-exec on inherited descriptors before starting SSH, fully
+drains master stderr into a bounded diagnostic, and cleans up on lease EOF.
+Cleanup signals the process group with SIGTERM, waits five seconds, escalates
+to SIGKILL, reaps the child, removes the directory, and only then releases its
+inherited daemon lock. Runtime PIDs are neither persisted nor adopted.
+
 ## State model
 
 Model rule runtime state explicitly using the transitions and deadlines in

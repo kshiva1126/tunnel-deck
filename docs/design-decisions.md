@@ -292,7 +292,10 @@ The public daemon socket uses the existing version 1 newline-JSON contract,
 with a 1 MiB encoded-frame limit and five-second client/server I/O deadlines.
 Malformed and oversized frames close only their connection after a structured
 error. Version mismatch is rejected before dispatch. UUID request correlation
-is checked by clients. A subscription consumes its client connection and keeps
+is checked by clients. Stop responses use a ten-second client deadline so the
+five-second TERM grace and bounded guardian cleanup can finish without reporting
+a false timeout; the daemon state lock is not held during that wait. A
+subscription consumes its client connection and keeps
 one buffered reader across the acknowledgement and subsequent event frames, so
 already-buffered events are not discarded. Event sequence state is daemon-owned;
 each subscriber has a 64-event bounded queue and is disconnected on lag.
@@ -313,3 +316,35 @@ emits no duplicate event. The foundation CLI currently accepts UUIDs for rule
 remove/start/stop; exact-name lookup remains part of the full CLI slice in GH-6.
 This issue does not claim that a start launches OpenSSH; process supervision and
 guardian cleanup remain the next Milestone 2 slice.
+
+### M2 OpenSSH guardian implementation
+
+Each start creates a mode-0700 attempt directory and launches the same binary
+in hidden guardian mode. Only a private socketpair lease and a clone of the
+daemon's locked open-file description are inherited. The validated rule is
+sent over the socketpair without a shell; the guardian restores close-on-exec
+before spawning SSH, so SSH children inherit neither descriptor.
+
+The foreground master receives the accepted options and no forwarding flag.
+Readiness requires a private `-O check`; Active is emitted only after a separate
+configuration-free `-O forward` accepts the requested forwarding. IPv6 fields
+are bracketed. Master stderr is continuously drained with the first 64 KiB
+retained, control calls have five-second deadlines, and startup has the agreed
+thirty-second deadline.
+
+The guardian keeps the master group leader unreaped while signaling its group.
+Lease EOF sends SIGTERM, waits five seconds, sends SIGKILL if necessary, reaps,
+removes the attempt directory, and finally drops the inherited lock. Stop can
+remove the Starting marker during connection; a later acceptance is discarded
+and cleaned up without a delayed Active event. No old or persisted PID is used
+as signaling authority.
+
+GH-5 local verification (2026-09-23): Linux x86_64, Rust 1.85.0;
+`cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`,
+and `cargo test --all-features` pass (71 unit tests, 5 CLI tests, 5 process
+lifecycle tests, doc-tests). An isolated OpenSSH 10.5p1 probe using disposable
+keys and configuration also passes strict host-key verification, private-master
+isolation, Local/Remote/Dynamic forwarding with real traffic, conflicts,
+cancellation, and daemon-SIGKILL guardian cleanup. Native macOS execution
+remains tracked separately; the PR's macOS job validates this Rust path on a
+native runner without claiming a full release-machine acceptance test.
