@@ -59,7 +59,7 @@ jobs:
         env:
           RUSTFLAGS: ${{ matrix.rustflags }}
         run: cargo build --locked --release --target "${{ matrix.target }}"
-      - name: Package deterministic artifact and evidence
+      - name: Package deterministic artifact
         env:
           RELEASE_TARGET: ${{ matrix.target }}
           RELEASE_MINIMUM_OS: ${{ matrix.minimum_os }}
@@ -80,6 +80,13 @@ jobs:
             --linkage "$RELEASE_LINKAGE" \
             --source-revision "$GITHUB_SHA" \
             --source-date-epoch "$source_date_epoch"
+      - name: Natively smoke-test packaged artifact
+        env:
+          RELEASE_TARGET: ${{ matrix.target }}
+        run: |
+          version="$(cargo metadata --locked --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+          python3 scripts/release/smoke.py \
+            --metadata "dist/tunnel-deck-${version}-${RELEASE_TARGET}.json"
       - name: Upload target artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
