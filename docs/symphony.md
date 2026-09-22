@@ -150,6 +150,28 @@ Cargo supply-chain, architecture, IPC/storage/process-policy, host-key weakening
 destructive-migration, and credential-like changes stop at `human-review`
 instead of being auto-merged.
 
+Cargo manifest/lock changes are not automatically supply-chain exceptions.
+The trusted review driver fetches `Cargo.lock` and, when needed, `Cargo.toml`
+from the exact PR base and head commits through GitHub. Each file must be a
+regular, base64-encoded UTF-8 response no larger than 2 MiB. It compares the
+lock package identity set `(name, version, source, checksum)` and each package's
+normalized dependency references. Formatting and dependency ordering may differ,
+while a dependency-edge change, package addition/removal, or any identity-field
+change stops at `human-review`.
+
+For `Cargo.toml`, the base text must remain unchanged and in order. The only
+permitted inserted lines are unique, single-line registry dependency
+declarations such as `libc = "0.2"` inside dependency, dev-dependency,
+build-dependency, or target-specific dependency tables, and every declared
+package name must already occur in the head lock. Table-style declarations and
+all other manifest edits stop, including features, alternate source/registry,
+git/path dependencies, patches, profiles, package build settings, removals,
+and version edits. Missing, empty, oversized, non-UTF-8, malformed, duplicate,
+unfetchable, or otherwise ambiguous Cargo inputs fail closed. This narrow
+exception does not change the existing stops for `docs/architecture.md`,
+authentication, storage/IPC/process-policy paths, dangerous SSH settings,
+destructive migration, dependencies, required CI, or CodeRabbit findings.
+
 ### Stops and manual recovery
 
 The driver moves exceptional work out of `agent-ready`, adds `human-review`,
