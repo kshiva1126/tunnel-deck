@@ -377,3 +377,26 @@ Ratatui 0.29, Crossterm 0.28, and signal-hook 0.3 were added from crates.io;
 their package manifests declare MIT-family compatible licensing and no
 third-party source or assets were copied. Native macOS terminal, signal, and
 browser behavior still requires post-publication validation.
+
+### M4 runtime recovery and diagnostics
+
+The daemon, rather than a client or guardian, owns automatic recovery. Only
+persisted rules with `auto_start` are restored when a daemon starts. A rule with
+`reconnect` uses capped exponential full jitter with a 60-second ceiling; a
+successful 60-second run resets the retry attempt. Manual stop records intent
+before cancelling a pending or active attempt, so a concurrent retry cannot
+restart it. Guardians continue to own exactly one OpenSSH attempt and never
+implement retry policy.
+
+Only recognized OpenSSH failure patterns become fixed authentication,
+host-key, listener, network, or remote-rejection diagnostics. Raw stderr is not
+returned or logged, and an unrecognized failure remains `unknown`. Unexpected
+exit of a previously active attempt is likewise not asserted to be a network
+failure. Runtime status exposes uptime, reconnect count, and the last redacted
+diagnostic for the TUI and CLI.
+
+The bounded rotating-log primitive is deliberately not connected to runtime
+events until the settings contract defines its level. Application settings
+need an explicit versioned persistence and IPC decision; that work is tracked
+in GH-42, with log integration in GH-43. The existing TOML v1 and IPC v1 shapes
+are unchanged by this runtime slice.

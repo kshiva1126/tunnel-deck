@@ -1,4 +1,4 @@
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use std::{
     env,
@@ -26,7 +26,7 @@ use crate::{
     name = "tdeck",
     version,
     about = "Manage SSH port forwarding",
-    long_about = "TunnelDeck manages SSH hosts and Local forwarding through a terminal UI, per-user daemon, and scriptable CLI.\n\nAdditional forwarding types remain in development."
+    long_about = "TunnelDeck manages SSH hosts and Local forwarding plus Remote and Dynamic forwarding through a terminal UI, per-user daemon, and scriptable CLI."
 )]
 pub struct Cli {
     /// Emit one JSON value for automation
@@ -78,7 +78,7 @@ struct HostAliasArgs {
 enum ForwardCommand {
     /// List forwarding rules
     List,
-    /// Add a Local forwarding rule
+    /// Add a Local, Remote, or Dynamic forwarding rule
     Add(AddArgs),
     /// Remove a stopped forwarding rule
     Remove(RuleArgs),
@@ -96,6 +96,8 @@ struct RuleArgs {
 
 #[derive(Debug, Args)]
 struct AddArgs {
+    #[arg(long, value_enum, default_value_t = ForwardKind::Local)]
+    kind: ForwardKind,
     #[arg(long)]
     name: String,
     #[arg(long = "host")]
@@ -107,11 +109,18 @@ struct AddArgs {
     #[arg(long, default_value = "127.0.0.1")]
     destination_host: String,
     #[arg(long)]
-    destination_port: u16,
+    destination_port: Option<u16>,
     #[arg(long)]
     auto_start: bool,
     #[arg(long)]
     reconnect: bool,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ForwardKind {
+    Local,
+    Remote,
+    Dynamic,
 }
 
 #[derive(Debug, Subcommand)]
@@ -141,22 +150,35 @@ impl Cli {
                 ForwardCommand::List => {
                     daemon_call(Operation::ForwardList, serde_json::json!({}), json_output)
                 }
-                ForwardCommand::Add(args) => daemon_call(
-                    Operation::ForwardAdd,
-                    serde_json::json!({
-                        "kind": "local",
+                ForwardCommand::Add(args) => {
+                    let kind = match args.kind {
+                        ForwardKind::Local => "local",
+                        ForwardKind::Remote => "remote",
+                        ForwardKind::Dynamic => "dynamic",
+                    };
+                    if !matches!(args.kind, ForwardKind::Dynamic) && args.destination_port.is_none()
+                    {
+                        return Err(AppError::Configuration(
+                            "--destination-port is required for local and remote forwarding".into(),
+                        ));
+                    }
+                    let mut payload = serde_json::json!({
+                        "kind": kind,
                         "id": uuid::Uuid::new_v4(),
                         "name": args.name,
                         "ssh_host_alias": args.ssh_host_alias,
                         "bind_address": args.bind_address,
                         "bind_port": args.bind_port,
-                        "destination_host": args.destination_host,
-                        "destination_port": args.destination_port,
                         "auto_start": args.auto_start,
                         "reconnect": args.reconnect,
-                    }),
-                    json_output,
-                ),
+                    });
+                    if !matches!(args.kind, ForwardKind::Dynamic) {
+                        payload["destination_host"] = serde_json::json!(args.destination_host);
+                        payload["destination_port"] =
+                            serde_json::json!(args.destination_port.unwrap());
+                    }
+                    daemon_call(Operation::ForwardAdd, payload, json_output)
+                }
                 ForwardCommand::Remove(args) => {
                     daemon_rule_call(Operation::ForwardRemove, args.rule, json_output)
                 }
@@ -298,15 +320,18 @@ fn run_daemon() -> Result<(), AppError> {
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("ssh"));
-    let manager = DaemonManager::open_managed(
-        config_directory,
-        paths.runtime.clone(),
-        executable,
-        ssh,
-        guardian_lock,
-    )
-    .map_err(|error| AppError::Configuration(error.to_string()))?;
-    lifecycle::run(endpoint, Arc::new(manager)).map_err(|error| AppError::Ipc(error.to_string()))
+    let manager = Arc::new(
+        DaemonManager::open_managed(
+            config_directory,
+            paths.runtime.clone(),
+            executable,
+            ssh,
+            guardian_lock,
+        )
+        .map_err(|error| AppError::Configuration(error.to_string()))?,
+    );
+    manager.start_supervisor();
+    lifecycle::run(endpoint, manager).map_err(|error| AppError::Ipc(error.to_string()))
 }
 
 fn execute_host(command: HostCommand, json_output: bool) -> Result<(), AppError> {
