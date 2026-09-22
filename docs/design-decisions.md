@@ -60,6 +60,31 @@ execution on both architectures, and human TUI/browser/install checks are still
 required before claiming release-verified macOS support; see
 [the macOS validation checklist](macos-validation.md).
 
+### M5 release artifact generation
+
+The release workflow builds the four platform triples from one source revision
+with Rust 1.85.0 and `Cargo.lock`. Linux GNU artifacts are built on native
+Ubuntu 22.04 x86_64 and arm64 runners to retain the selected glibc 2.35
+baseline. macOS builds use native Intel and Apple Silicon runners and set
+`MACOSX_DEPLOYMENT_TARGET=13.0`. Linux artifacts dynamically link glibc and
+macOS artifacts dynamically link
+libSystem; the packager verifies those properties with native object-file tools.
+
+Archive names include the package version and full target triple. A source
+commit timestamp supplies every tar and gzip timestamp, ownership is normalized,
+and platform build identifiers are disabled. Each target emits a JSON evidence
+record and SHA-256 sidecar. The aggregate step refuses missing, duplicate, or
+checksum-mismatched targets, then emits `SHA256SUMS` and a single release
+manifest in a fixed target order.
+
+Pull requests and manual dispatches run the complete build and aggregation
+without release-write permission. Only a `v*` tag enables final GitHub Release
+publication. Action references use immutable commit IDs. Release evidence keeps
+`build.status` and `native_smoke_test.status` separate; this slice records the
+packaged-artifact native smoke as `not_run`. Ordinary native CI or a cross-build
+does not upgrade that field. Native distribution smoke on all four targets,
+macOS 13/Intel acceptance, signing, and notarization remain later M5 work.
+
 ## One private OpenSSH master per rule
 
 Use a foreground OpenSSH master with a fresh control socket for each start

@@ -1,0 +1,131 @@
+name: Release artifacts
+
+on:
+  pull_request:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  MACOSX_DEPLOYMENT_TARGET: "13.0"
+
+jobs:
+  build:
+    name: build-${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+            minimum_os: Linux 5.15 / glibc 2.35
+            linkage: dynamic glibc
+            rustflags: -C link-arg=-Wl,--build-id=none
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
+            minimum_os: Linux 5.15 / glibc 2.35
+            linkage: dynamic glibc
+            rustflags: -C link-arg=-Wl,--build-id=none
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+            minimum_os: macOS 13.0
+            linkage: dynamic libSystem
+            rustflags: -C link-arg=-Wl,-no_uuid
+          - target: aarch64-apple-darwin
+            runner: macos-15
+            minimum_os: macOS 13.0
+            linkage: dynamic libSystem
+            rustflags: -C link-arg=-Wl,-no_uuid
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check out the exact source revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust target
+        run: |
+          rustup target add "${{ matrix.target }}"
+          rustc --version --verbose
+      - name: Build locked release binary
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+        run: cargo build --locked --release --target "${{ matrix.target }}"
+      - name: Package deterministic artifact and evidence
+        env:
+          RELEASE_TARGET: ${{ matrix.target }}
+          RELEASE_MINIMUM_OS: ${{ matrix.minimum_os }}
+          RELEASE_LINKAGE: ${{ matrix.linkage }}
+        run: |
+          version="$(cargo metadata --locked --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+          if [ "$GITHUB_REF_TYPE" = "tag" ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "tag $GITHUB_REF_NAME does not match package version $version" >&2
+            exit 1
+          fi
+          source_date_epoch="$(git log -1 --format=%ct)"
+          python3 scripts/release/package.py \
+            --target "$RELEASE_TARGET" \
+            --binary "target/$RELEASE_TARGET/release/tdeck" \
+            --output dist \
+            --version "$version" \
+            --minimum-os "$RELEASE_MINIMUM_OS" \
+            --linkage "$RELEASE_LINKAGE" \
+            --source-revision "$GITHUB_SHA" \
+            --source-date-epoch "$source_date_epoch"
+      - name: Upload target artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          compression-level: 0
+
+  manifest:
+    name: release-manifest
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Check out manifest generator
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download all target artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: release-*
+          path: downloaded
+      - name: Validate checksums and create release manifest
+        run: python3 scripts/release/aggregate.py --input downloaded --output release
+      - name: Upload complete release set
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: tunnel-deck-release
+          path: release/*
+          if-no-files-found: error
+          compression-level: 0
+
+  publish:
+    name: publish-release
+    if: github.ref_type == 'tag'
+    needs: manifest
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified release set
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: tunnel-deck-release
+          path: release
+      - name: Create release and upload artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" release/* --verify-tag --generate-notes --title "TunnelDeck $GITHUB_REF_NAME"

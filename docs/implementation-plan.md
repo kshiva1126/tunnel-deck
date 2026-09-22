@@ -343,6 +343,14 @@ Exit criteria:
 
 ## Milestone 5 — distribution and hardening
 
+Implementation status: GH-48 adds reproducible generation of the four target
+archives, per-archive SHA-256 files, and an aggregate manifest/checksum list.
+The same workflow is executable in pull requests and manual runs; tag runs add
+publication only after aggregation. Metadata distinguishes successful builds
+from packaged-artifact native smoke, which remains unverified here. macOS
+13/Intel native acceptance, four-target distribution smoke, signing, and
+notarization remain separate work, so this does not complete Milestone 5.
+
 Tasks:
 
 - Produce Linux `x86_64`/`aarch64` and macOS Intel/Apple Silicon artifacts and

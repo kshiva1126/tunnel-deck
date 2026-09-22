@@ -57,6 +57,23 @@ failure.
 The exact command tree should be validated during the first implementation
 milestone rather than treated as frozen.
 
+## Release artifacts
+
+The `Release artifacts` GitHub Actions workflow builds archives for
+`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
+`x86_64-apple-darwin`, and `aarch64-apple-darwin`. It runs for pull requests
+and manual dispatches as well as `v*` tags, so the same release path is checked
+before publication. Download the `tunnel-deck-release` workflow artifact to
+obtain the four deterministic archives, `SHA256SUMS`, and
+`release-manifest.json`.
+
+The manifest records the target triple, dynamic-linking model, minimum OS,
+build result, and packaged-artifact native-smoke status separately. A successful
+build is not a native execution claim. Native smoke tests of the packaged
+artifacts on every distribution target remain separate release acceptance work.
+Tag runs create a GitHub Release only after all four outputs and checksums have
+been validated.
+
 ## Documents
 
 Track work and implementation order in the
