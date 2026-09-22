@@ -20,7 +20,7 @@ use uuid::Uuid;
 pub const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 pub const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 pub const STOP_GRACE: Duration = Duration::from_secs(5);
-pub const STOP_RESPONSE_TIMEOUT: Duration = Duration::from_secs(8);
+pub const STOP_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
 pub const MAX_STDERR_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Error)]
@@ -47,29 +47,52 @@ struct GuardianSpec {
 struct GuardianReport {
     accepted: bool,
     diagnostic: String,
+    master_pid: u32,
 }
 
 pub struct ManagedAttempt {
     lease: Option<UnixStream>,
-    guardian: Child,
+    guardian: Option<Child>,
+    master_pid: i32,
+    attempt_dir: PathBuf,
     pub attempt_id: Uuid,
 }
 
 impl ManagedAttempt {
     pub fn stop(mut self) -> Result<(), ProcessError> {
-        self.lease.take();
-        wait_child(&mut self.guardian, STOP_GRACE + Duration::from_secs(2))
+        self.cleanup()
     }
 
     pub fn has_exited(&mut self) -> Result<bool, ProcessError> {
-        Ok(self.guardian.try_wait()?.is_some())
+        Ok(match self.guardian.as_mut() {
+            Some(guardian) => guardian.try_wait()?.is_some(),
+            None => true,
+        })
+    }
+
+    fn cleanup(&mut self) -> Result<(), ProcessError> {
+        self.lease.take();
+        let Some(mut guardian) = self.guardian.take() else {
+            return Ok(());
+        };
+        match wait_child(&mut guardian, STOP_GRACE + Duration::from_secs(2)) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                // The group belongs to this still-live attempt; no persisted or
+                // externally supplied PID is used as signaling authority.
+                unsafe { libc::kill(-self.master_pid, libc::SIGKILL) };
+                let _ = guardian.kill();
+                let _ = guardian.wait();
+                let _ = fs::remove_dir_all(&self.attempt_dir);
+                Err(error)
+            }
+        }
     }
 }
 
 impl Drop for ManagedAttempt {
     fn drop(&mut self) {
-        self.lease.take();
-        let _ = wait_child(&mut self.guardian, STOP_GRACE + Duration::from_secs(2));
+        let _ = self.cleanup();
     }
 }
 
@@ -151,10 +174,23 @@ pub fn start_attempt(
         let _ = fs::remove_dir_all(&spec.attempt_dir);
         return Err(ProcessError::Startup(report.diagnostic));
     }
+    let master_pid = match i32::try_from(report.master_pid).ok().filter(|pid| *pid > 0) {
+        Some(pid) => pid,
+        None => {
+            drop(daemon_lease);
+            let _ = wait_child(&mut guardian, STOP_GRACE + Duration::from_secs(2));
+            let _ = fs::remove_dir_all(&spec.attempt_dir);
+            return Err(ProcessError::Protocol(
+                "guardian returned an invalid master PID".into(),
+            ));
+        }
+    };
     daemon_lease.set_read_timeout(None)?;
     Ok(ManagedAttempt {
         lease: Some(daemon_lease),
-        guardian,
+        guardian: Some(guardian),
+        master_pid,
+        attempt_dir: spec.attempt_dir,
         attempt_id,
     })
 }
@@ -209,13 +245,15 @@ pub fn run_guardian(lease_fd: RawFd, lock_fd: RawFd) -> Result<(), ProcessError>
     let spec: GuardianSpec = read_json(&mut BufReader::new(&lease))?;
     let outcome = guardian_start(&spec);
     let report = match &outcome {
-        Ok(_) => GuardianReport {
+        Ok((master, _)) => GuardianReport {
             accepted: true,
             diagnostic: String::new(),
+            master_pid: master.id(),
         },
         Err(error) => GuardianReport {
             accepted: false,
             diagnostic: error.to_string(),
+            master_pid: 0,
         },
     };
     if let Err(error) = write_json(&lease, &report) {

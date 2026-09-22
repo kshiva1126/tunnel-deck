@@ -292,7 +292,7 @@ The public daemon socket uses the existing version 1 newline-JSON contract,
 with a 1 MiB encoded-frame limit and five-second client/server I/O deadlines.
 Malformed and oversized frames close only their connection after a structured
 error. Version mismatch is rejected before dispatch. UUID request correlation
-is checked by clients. Stop responses use an eight-second client deadline so the
+is checked by clients. Stop responses use a ten-second client deadline so the
 five-second TERM grace and bounded guardian cleanup can finish without reporting
 a false timeout; the daemon state lock is not held during that wait. A
 subscription consumes its client connection and keeps
