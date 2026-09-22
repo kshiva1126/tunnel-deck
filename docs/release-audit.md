@@ -8,7 +8,7 @@ would make the commit circular.
 
 Audit date: 2026-09-22. Local environment: Linux x86_64, kernel
 7.0.0-31-generic, Rust 1.85.0 (4d91de4e), Cargo 1.85.0, and cargo-audit
-0.22.1. Native macOS and packaged-artifact checks are listed separately below
+0.22.2. Native macOS and packaged-artifact checks are listed separately below
 and are not inferred from this Linux run.
 
 ## Result and severity
@@ -26,8 +26,8 @@ RUSTSEC-2026-0253 requires `LruCache::pop` with a key whose destructor panics,
 followed by cache mutation. Ratatui's layout cache does not invoke those methods,
 and its `(Rect, Layout)` key does not have a user-defined destructor. These
 preconditions are not reachable through TunnelDeck's use, so this is accepted
-as low residual risk rather than an exploitable release finding. Upgrading to
-ratatui 0.30 was rejected because it requires Rust 1.86 or later, conflicting
+as low residual risk rather than an exploitable release finding. The current
+ratatui 0.30.2 reaches a fixed `lru 0.18.4` but requires Rust 1.88, conflicting
 with the agreed Rust 1.85 baseline. The unmaintained `paste 1.0.15` warning is
 also transitive through ratatui and is a maintenance risk, not a vulnerability.
 Re-evaluate both when the toolchain baseline or TUI dependency is intentionally
@@ -80,6 +80,7 @@ being described as solved.
 - `cargo audit` is a RustSec database check, not source-level proof that all
   malicious-input or supply-chain behavior is absent.
 
-Remote Linux/macOS CI and release-artifact smoke remain post-publication human
-review conditions. Their absence before publication does not change the local
-audit result and must not be reported as a pass.
+Remote Linux/macOS CI remains post-publication automated evidence. Release-
+artifact smoke and the explicitly listed native/human checks remain separate
+acceptance conditions. Their absence before publication does not change the
+local audit result and must not be reported as a pass.
