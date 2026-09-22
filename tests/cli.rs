@@ -133,7 +133,12 @@ fn local_rule_lifecycle_is_available_across_cli_processes() {
         serde_json::from_slice(&output.stdout).unwrap()
     }
 
-    let root = tempfile::tempdir().unwrap();
+    // Keep the path short enough for macOS' Unix-domain socket limit. The
+    // daemon adds an attempt UUID and OpenSSH control socket below this root.
+    let root = tempfile::Builder::new()
+        .prefix("td-cli-")
+        .tempdir_in("/tmp")
+        .unwrap();
     for directory in ["config", "state", "runtime"] {
         fs::create_dir(root.path().join(directory)).unwrap();
         fs::set_permissions(
