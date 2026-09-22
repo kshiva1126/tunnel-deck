@@ -14,6 +14,7 @@ use crate::{
     },
     error::AppError,
     ipc::{Client, DEFAULT_TIMEOUT, Operation, Request, Response},
+    logging::{DEFAULT_BACKUPS, DEFAULT_MAX_BYTES, RotatingLog},
     platform::{
         CURRENT,
         paths::{Paths, XdgOverrides},
@@ -391,6 +392,12 @@ fn print_human(operation: Operation, value: &serde_json::Value) {
 
 fn run_daemon() -> Result<(), AppError> {
     let paths = resolved_paths()?;
+    let log_directory = paths.log.parent().unwrap_or_else(|| Path::new("/"));
+    crate::platform::private_fs::PrivateDirectory::open(log_directory)
+        .map_err(|error| AppError::Configuration(error.to_string()))?;
+    let log = RotatingLog::new(&paths.log, DEFAULT_MAX_BYTES, DEFAULT_BACKUPS);
+    log.validate()
+        .map_err(|error| AppError::Configuration(error.to_string()))?;
     let socket = paths
         .socket_path(CURRENT)
         .map_err(|error| AppError::Ipc(error.to_string()))?;
@@ -415,6 +422,7 @@ fn run_daemon() -> Result<(), AppError> {
             executable,
             ssh,
             guardian_lock,
+            log,
         )
         .map_err(|error| AppError::Configuration(error.to_string()))?,
     );

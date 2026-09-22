@@ -1,7 +1,7 @@
 //! Daemon-owned desired configuration and idempotent runtime intent.
 
 use crate::{
-    config::{ConfigStore, ConfigV2, Rule as WireRule, Settings},
+    config::{ConfigStore, ConfigV2, LogLevel, Rule as WireRule, Settings},
     daemon::{
         lifecycle::RequestHandler,
         process::{self, DiagnosticKind, ManagedAttempt},
@@ -9,6 +9,7 @@ use crate::{
     },
     domain::{rule::Rule, validation::validate_rule_set},
     ipc::{self, ErrorCode, Event, EventHub, Operation, Request, Response},
+    logging::RotatingLog,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -51,6 +52,7 @@ pub struct DaemonManager {
     state: Mutex<State>,
     events: EventHub,
     process: Option<ProcessSettings>,
+    log: Option<RotatingLog>,
 }
 
 struct ProcessSettings {
@@ -80,7 +82,17 @@ impl DaemonManager {
             }),
             events: EventHub::default(),
             process: None,
+            log: None,
         })
+    }
+
+    pub fn open_logged(
+        config_directory: &Path,
+        log: RotatingLog,
+    ) -> Result<Self, crate::config::StoreError> {
+        let mut manager = Self::open(config_directory)?;
+        manager.log = Some(log);
+        Ok(manager)
     }
 
     pub fn open_managed(
@@ -89,6 +101,7 @@ impl DaemonManager {
         executable: PathBuf,
         ssh: PathBuf,
         lock: File,
+        log: RotatingLog,
     ) -> Result<Self, crate::config::StoreError> {
         let mut manager = Self::open(config_directory)?;
         manager.process = Some(ProcessSettings {
@@ -97,7 +110,23 @@ impl DaemonManager {
             runtime,
             lock,
         });
+        manager.log = Some(log);
         Ok(manager)
+    }
+
+    fn log_event(&self, level: LogLevel, message: &str) {
+        let enabled = self
+            .state
+            .lock()
+            .map(|state| state.settings.log_level.allows(level))
+            .unwrap_or(false);
+        if enabled {
+            if let Some(log) = &self.log {
+                // Runtime logging is observational. A path that becomes unsafe or
+                // unavailable rejects this record without undoing process state.
+                let _ = log.write(level.as_str(), message);
+            }
+        }
     }
 
     /// Starts daemon-owned recovery after the public socket and lifetime lock
@@ -316,6 +345,7 @@ impl DaemonManager {
                 Ok(attempt) => Some(attempt),
                 Err(error) => {
                     let diagnostic = process::classify_diagnostic(&error.to_string());
+                    let mut reconnect_scheduled = false;
                     let mut state = self.state.lock().map_err(|_| {
                         (
                             ErrorCode::Internal,
@@ -332,6 +362,7 @@ impl DaemonManager {
                             message: diagnostic.message.to_owned(),
                         });
                         if reconnect_enabled {
+                            reconnect_scheduled = true;
                             let entropy = u64::from_le_bytes(
                                 attempt_id.as_bytes()[..8].try_into().expect("UUID prefix"),
                             );
@@ -347,6 +378,27 @@ impl DaemonManager {
                         } else {
                             state.running.insert(id, Attempt::Failed);
                         }
+                    }
+                    drop(state);
+                    self.log_event(
+                        LogLevel::Error,
+                        &format!(
+                            "event=rule_failed rule_id={id} diagnostic_kind={} diagnostic={}",
+                            diagnostic.kind.as_str(),
+                            diagnostic.message
+                        ),
+                    );
+                    if reconnect_scheduled {
+                        self.log_event(
+                            LogLevel::Info,
+                            &format!(
+                                "event=rule_reconnecting rule_id={id} diagnostic_kind={} diagnostic={}",
+                                diagnostic.kind.as_str(),
+                                diagnostic.message
+                            ),
+                        );
+                        self.events
+                            .publish("rule_reconnecting", json!({"rule_id": id}));
                     }
                     return Err((ErrorCode::Unavailable, diagnostic.message.to_owned()));
                 }
@@ -379,6 +431,7 @@ impl DaemonManager {
         info.active_since = Some(Instant::now());
         info.last_error = None;
         drop(state);
+        self.log_event(LogLevel::Info, &format!("event=rule_started rule_id={id}"));
         self.events.publish("rule_started", json!({"rule_id": id}));
         Ok(json!({"rule_id": id, "start_requested": true, "changed": true}))
     }
@@ -407,6 +460,7 @@ impl DaemonManager {
                 .map_err(|error| (ErrorCode::Internal, error.to_string()))?;
         }
         if changed {
+            self.log_event(LogLevel::Info, &format!("event=rule_stopped rule_id={id}"));
             self.events.publish("rule_stopped", json!({"rule_id": id}));
         }
         Ok(json!({"rule_id": id, "start_requested": false, "changed": changed}))
@@ -494,10 +548,22 @@ impl DaemonManager {
             }
         }
         for id in reconnecting {
+            self.log_event(
+                LogLevel::Info,
+                &format!(
+                    "event=rule_reconnecting rule_id={id} diagnostic_kind=unknown diagnostic=the SSH connection ended unexpectedly"
+                ),
+            );
             self.events
                 .publish("rule_reconnecting", json!({"rule_id": id}));
         }
         for id in terminal_failures {
+            self.log_event(
+                LogLevel::Error,
+                &format!(
+                    "event=rule_failed rule_id={id} diagnostic_kind=unknown diagnostic=the SSH connection ended unexpectedly"
+                ),
+            );
             self.events.publish("rule_failed", json!({"rule_id": id}));
         }
         for id in retry {
@@ -840,5 +906,26 @@ mod tests {
         let saved = std::fs::read_to_string(root.path().join("config.toml")).unwrap();
         let parsed: ConfigV2 = toml::from_str(&saved).unwrap();
         assert_eq!(serde_json::to_value(parsed.settings).unwrap(), desired);
+    }
+
+    #[test]
+    fn configured_log_level_filters_start_and_stop_events() {
+        let root = private_tempdir();
+        let log_path = root.path().join("events.log");
+        let manager =
+            DaemonManager::open_logged(root.path(), RotatingLog::new(&log_path, 1024, 1)).unwrap();
+        let id = Uuid::new_v4();
+        result(manager.handle(&request(Operation::ForwardAdd, json!({"kind":"dynamic","id":id,"name":"proxy","ssh_host_alias":"host","bind_address":"127.0.0.1","bind_port":1080,"auto_start":false,"reconnect":false}))));
+        result(manager.handle(&request(Operation::SettingsUpdate, json!({"theme":"system","log_level":"error","default_reconnect":false,"default_auto_start":false}))));
+        result(manager.handle(&request(Operation::ForwardStart, json!({"rule_id":id}))));
+        result(manager.handle(&request(Operation::ForwardStop, json!({"rule_id":id}))));
+        assert!(!log_path.exists());
+
+        result(manager.handle(&request(Operation::SettingsUpdate, json!({"theme":"system","log_level":"info","default_reconnect":false,"default_auto_start":false}))));
+        result(manager.handle(&request(Operation::ForwardStart, json!({"rule_id":id}))));
+        result(manager.handle(&request(Operation::ForwardStop, json!({"rule_id":id}))));
+        let logged = std::fs::read_to_string(log_path).unwrap();
+        assert!(logged.contains(&format!("info\tevent=rule_started rule_id={id}")));
+        assert!(logged.contains(&format!("info\tevent=rule_stopped rule_id={id}")));
     }
 }

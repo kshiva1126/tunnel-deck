@@ -312,14 +312,15 @@ Exit criteria:
 Implementation status: Remote and Dynamic forwarding, daemon-owned auto-start
 and reconnect scheduling, redacted rule diagnostics, uptime/reconnect counters,
 and a bounded rotation primitive are implemented in GH-8. Versioned settings
-persistence and UI/CLI settings are tracked in GH-42; connecting the configured
-log level and daemon events to rotation is tracked in GH-43. The parent issue
-remains open until those follow-ups are complete.
+persistence and UI/CLI settings were implemented in GH-42. GH-43 connects the
+configured log level and classified daemon start/fail/reconnect/stop events to
+the private bounded log, with unsafe rotation-path rejection and behavior
+coverage. The parent issue remains open pending integrated review.
 
 GH-42 implements the settings follow-up with TOML schema v2, an explicit
 backup-first v1 migration, daemon-owned IPC get/update operations, CLI JSON and
 human output, and a TUI settings page. Theme and log-level persistence are
-contracts for their consumers; runtime log filtering remains GH-43.
+contracts for their consumers; GH-43 implements runtime log filtering.
 
 Tasks:
 
