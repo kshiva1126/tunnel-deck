@@ -11,6 +11,12 @@ pub enum AppError {
 
     #[error("IPC error: {0}")]
     Ipc(String),
+
+    #[error("SSH host operation failed: {0}")]
+    Host(#[from] crate::application::hosts::HostError),
+
+    #[error("SSH connection test failed: {0}")]
+    Connection(String),
 }
 
 /// Stable process exit statuses used by scripts.
@@ -27,7 +33,10 @@ impl From<&AppError> for ExitStatus {
     fn from(error: &AppError) -> Self {
         match error {
             AppError::Unavailable { .. } => Self::Unavailable,
-            AppError::Configuration(_) | AppError::Ipc(_) => Self::Software,
+            AppError::Configuration(_)
+            | AppError::Ipc(_)
+            | AppError::Host(_)
+            | AppError::Connection(_) => Self::Software,
         }
     }
 }

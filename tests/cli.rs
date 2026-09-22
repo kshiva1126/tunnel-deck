@@ -5,15 +5,31 @@ fn tdeck() -> Command {
 }
 
 #[test]
-fn help_describes_scaffold_without_claiming_operations_work() {
+fn help_describes_available_hosts_and_unavailable_tunnels() {
     let output = tdeck().arg("--help").output().expect("run tdeck --help");
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).expect("UTF-8 help");
-    assert!(stdout.contains("freezes the command interface"));
+    assert!(stdout.contains("SSH host listing, details, and connection tests are available"));
     assert!(stdout.contains("not implemented"));
     assert!(stdout.contains("host"));
     assert!(stdout.contains("forward"));
     assert!(stdout.contains("status"));
+}
+
+#[test]
+fn host_list_uses_an_isolated_ssh_fixture() {
+    let fixture_home =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ssh_home");
+    let output = tdeck()
+        .env("HOME", fixture_home)
+        .args(["host", "list"])
+        .output()
+        .expect("list SSH hosts");
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("UTF-8 aliases"),
+        "api\ndb\nweb\n"
+    );
 }
 
 #[test]

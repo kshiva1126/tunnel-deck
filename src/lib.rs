@@ -1,7 +1,7 @@
 //! TunnelDeck application library.
 //!
-//! Milestone 0 freezes the command, configuration, and IPC shapes. Tunnel
-//! management remains deliberately unavailable until later milestones.
+//! Host discovery is available while tunnel management remains deliberately
+//! unavailable until later milestones.
 
 pub mod application;
 pub mod cli;

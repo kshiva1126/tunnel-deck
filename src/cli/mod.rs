@@ -1,13 +1,18 @@
 use clap::{Args, Parser, Subcommand};
 
-use crate::error::AppError;
+use std::{env, path::PathBuf};
+
+use crate::{
+    application::hosts::{ConnectionOutcome, HostCatalog},
+    error::AppError,
+};
 
 #[derive(Debug, Parser)]
 #[command(
     name = "tdeck",
     version,
     about = "Manage SSH port forwarding (implementation in progress)",
-    long_about = "TunnelDeck will manage SSH port forwarding from a TUI and scriptable CLI.\n\nThis build freezes the command interface; tunnel operations are not implemented yet."
+    long_about = "TunnelDeck manages SSH hosts and will manage port forwarding from a TUI and scriptable CLI.\n\nSSH host listing, details, and connection tests are available; tunnel operations are not implemented yet."
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -16,7 +21,7 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Inspect SSH hosts (not implemented)
+    /// Inspect SSH hosts
     Host {
         #[command(subcommand)]
         command: HostCommand,
@@ -38,11 +43,11 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum HostCommand {
-    /// List discovered SSH host aliases (not implemented)
+    /// List discovered SSH host aliases
     List,
-    /// Show effective settings for an SSH host alias (not implemented)
+    /// Show effective settings for an SSH host alias
     Show(HostAliasArgs),
-    /// Test non-interactive SSH connectivity (not implemented)
+    /// Test non-interactive SSH connectivity
     Test(HostAliasArgs),
 }
 
@@ -82,17 +87,7 @@ impl Cli {
     pub fn execute(self) -> Result<(), AppError> {
         let feature = match self.command {
             None => "TUI",
-            Some(Command::Host { command }) => match command {
-                HostCommand::List => "host listing",
-                HostCommand::Show(args) => {
-                    let _ = args.alias;
-                    "host details"
-                }
-                HostCommand::Test(args) => {
-                    let _ = args.alias;
-                    "host connectivity testing"
-                }
-            },
+            Some(Command::Host { command }) => return execute_host(command),
             Some(Command::Forward { command }) => match command {
                 ForwardCommand::List => "forward listing",
                 ForwardCommand::Add => "forward creation",
@@ -117,4 +112,46 @@ impl Cli {
 
         Err(AppError::Unavailable { feature })
     }
+}
+
+fn execute_host(command: HostCommand) -> Result<(), AppError> {
+    let home = env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| AppError::Configuration("HOME is not set".to_owned()))?;
+    let ssh_home = home.join(".ssh");
+    let mut catalog = HostCatalog::new(ssh_home.join("config"), &ssh_home, "ssh");
+    match command {
+        HostCommand::List => {
+            let discovery = catalog.refresh()?;
+            for alias in discovery.aliases {
+                println!("{alias}");
+            }
+        }
+        HostCommand::Show(args) => {
+            let host = catalog.effective(&args.alias)?;
+            println!("alias: {}", host.alias);
+            println!("hostname: {}", host.hostname);
+            println!("user: {}", host.user);
+            println!("port: {}", host.port);
+            for identity in host.identity_files {
+                println!("identity-file: {identity}");
+            }
+            if let Some(proxy_jump) = host.proxy_jump {
+                println!("proxy-jump: {proxy_jump}");
+            }
+            if let Some(proxy_command) = host.proxy_command {
+                println!("proxy-command: {proxy_command}");
+            }
+        }
+        HostCommand::Test(args) => {
+            let outcome = catalog.test_connection(&args.alias)?;
+            if outcome == ConnectionOutcome::Success {
+                println!("{}", outcome.diagnostic());
+            } else {
+                return Err(AppError::Connection(outcome.diagnostic().to_owned()));
+            }
+        }
+    }
+    Ok(())
 }
