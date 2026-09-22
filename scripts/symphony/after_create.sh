@@ -5,6 +5,7 @@ set -eu
 workspace=${1:?workspace path is required}
 control_root=${SYMPHONY_CONTROL_ROOT:?SYMPHONY_CONTROL_ROOT is required}
 . "$control_root/scripts/symphony/common.sh"
+become_agent_for_workspace "$workspace" "$0" "$@"
 
 require_command git
 require_command cargo

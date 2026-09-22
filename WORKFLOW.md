@@ -31,12 +31,11 @@ agent:
   max_turns: 1
 
 codex:
-  command: env -u SSH_AUTH_SOCK -u SYMPHONY_GITHUB_TOKEN -u GH_TOKEN -u GITHUB_TOKEN codex app-server
+  command: setpriv --reuid=$SYMPHONY_AGENT_UID --regid=$SYMPHONY_AGENT_GID --clear-groups env -u SSH_AUTH_SOCK -u SYMPHONY_GITHUB_TOKEN -u GH_TOKEN -u GITHUB_TOKEN codex app-server
   approval_policy: never
-  thread_sandbox: workspace-write
+  thread_sandbox: danger-full-access
   turn_sandbox_policy:
-    type: workspaceWrite
-    networkAccess: false
+    type: dangerFullAccess
 ---
 
 Work on GitHub Issue `{{ issue.identifier }}` in TunnelDeck.

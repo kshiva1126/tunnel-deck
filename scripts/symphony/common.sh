@@ -2,6 +2,9 @@
 
 set -eu
 
+SYMPHONY_AGENT_UID=${SYMPHONY_AGENT_UID:-}
+SYMPHONY_AGENT_GID=${SYMPHONY_AGENT_GID:-}
+
 # These constants are consumed by scripts that source this file.
 # shellcheck disable=SC2034
 repo_slug="kshiva1126/tunnel-deck"
@@ -31,4 +34,17 @@ require_command() {
 
 require_token() {
   [ -n "${SYMPHONY_GITHUB_TOKEN:-}" ] || die "SYMPHONY_GITHUB_TOKEN is not set"
+}
+
+become_agent_for_workspace() {
+  workspace_path=$1
+  shift
+  if [ "$(id -u)" -eq 0 ] && [ -n "$SYMPHONY_AGENT_UID" ]; then
+    chown -R "$SYMPHONY_AGENT_UID:$SYMPHONY_AGENT_GID" "$workspace_path"
+    exec setpriv \
+      --reuid="$SYMPHONY_AGENT_UID" \
+      --regid="$SYMPHONY_AGENT_GID" \
+      --clear-groups \
+      "$@"
+  fi
 }

@@ -37,8 +37,10 @@ Create these repository labels before the first run:
 
 Docker limits the worker to the checked-out repository, dedicated workspace and
 log directories, and temporary credential mounts. The container drops Linux
-capabilities, uses a read-only root filesystem, and exposes the dashboard only
-on loopback. It does not receive the Docker socket.
+capabilities except those needed to start Codex under the unprivileged worker
+UID, uses a read-only root filesystem, and exposes the dashboard only on
+loopback. It does not receive the Docker socket. The Codex turn uses the Docker
+container itself as its filesystem boundary.
 
 ```sh
 ./scripts/symphony/start-docker.sh
@@ -50,8 +52,9 @@ script uses `sg docker` for this run. Log out and back in once to make ordinary
 
 The first run builds a local image with pinned Symphony, Codex, GitHub CLI, and
 Rust versions. It mounts the host Codex login read-only, copies it into a
-temporary in-container home, and removes the temporary GitHub token file when
-the worker exits. Supplying a repository-scoped `SYMPHONY_GITHUB_TOKEN` remains
+temporary in-container home, and deletes the mounted GitHub token immediately
+after Symphony receives it. Supplying a repository-scoped
+`SYMPHONY_GITHUB_TOKEN` remains
 the least-privilege option.
 
 ## Run directly on the host
@@ -70,9 +73,11 @@ the port with `SYMPHONY_PORT`. Workspaces and logs default to:
 ~/.local/state/symphony/tunnel-deck/logs
 ```
 
-The worker accepts one issue at a time. Codex has write access only to the issue
-workspace and has no network access. GitHub credentials are removed from the
-Codex process. The trusted host hooks retain the credential so they can clone,
+The worker accepts one issue at a time. In Docker mode, Codex runs as an
+unprivileged UID inside the read-only container and can write to the dedicated
+workspace and cache mounts. GitHub credentials are removed from the Codex
+process and are held by the root-owned Symphony process. The trusted hooks
+retain the credential so they can clone,
 push the prepared branch, open a pull request, and move the issue from
 `agent-ready` to `human-review`.
 

@@ -33,7 +33,10 @@ auth_file=${CODEX_AUTH_FILE:-$HOME/.codex/auth.json}
   exit 1
 }
 
-token_file=$(mktemp)
+token_dir=$(mktemp -d)
+token_file="$token_dir/token"
+chmod 0700 "$token_dir"
+touch "$token_file"
 chmod 0600 "$token_file"
 
 if [ -n "${SYMPHONY_GITHUB_TOKEN:-}" ]; then
@@ -56,6 +59,7 @@ cleanup() {
   trap - EXIT HUP INT TERM
   docker stop -t 5 "$container_name" >/dev/null 2>&1 || true
   rm -f "$token_file"
+  rmdir "$token_dir" 2>/dev/null || true
   exit "$status"
 }
 trap cleanup EXIT HUP INT TERM
@@ -71,24 +75,32 @@ docker build \
 
 container_id=$(docker run --detach --rm --init \
   --name "$container_name" \
+  --user root \
   --read-only \
   --cap-drop ALL \
+  --cap-add CHOWN \
+  --cap-add SETUID \
+  --cap-add SETGID \
   --security-opt no-new-privileges \
   --pids-limit 512 \
   --tmpfs /tmp:rw,exec,nosuid,nodev,size=1g \
   --tmpfs "/home/worker/.codex:rw,nosuid,nodev,uid=$host_uid,gid=$host_gid,mode=0700" \
+  --env "SYMPHONY_AGENT_UID=$host_uid" \
+  --env "SYMPHONY_AGENT_GID=$host_gid" \
   --publish "127.0.0.1:$port:4001" \
   --mount "type=bind,src=$control_root,dst=/control,readonly" \
   --mount "type=bind,src=$workspace_root,dst=/workspaces" \
   --mount "type=bind,src=$logs_root,dst=/logs" \
   --mount "type=bind,src=$cargo_home,dst=/home/worker/.cargo" \
-  --mount "type=bind,src=$auth_file,dst=/run/secrets/codex-auth.json,readonly" \
-  --mount "type=bind,src=$token_file,dst=/run/secrets/github-token,readonly" \
+  --mount "type=bind,src=$auth_file,dst=/run/codex-auth.json,readonly" \
+  --mount "type=bind,src=$token_dir,dst=/run/github-secret" \
   "$image" \
   sh -eu -c '
-    cp /run/secrets/codex-auth.json "$HOME/.codex/auth.json"
+    cp /run/codex-auth.json "$HOME/.codex/auth.json"
     chmod 0600 "$HOME/.codex/auth.json"
-    SYMPHONY_GITHUB_TOKEN=$(cat /run/secrets/github-token)
+    chown "$SYMPHONY_AGENT_UID:$SYMPHONY_AGENT_GID" "$HOME/.codex/auth.json"
+    SYMPHONY_GITHUB_TOKEN=$(cat /run/github-secret/token)
+    rm -f /run/github-secret/token
     export SYMPHONY_GITHUB_TOKEN
     socat TCP-LISTEN:4001,fork,reuseaddr TCP:127.0.0.1:4000 &
     exec symphony /control/WORKFLOW.md \

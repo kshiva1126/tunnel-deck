@@ -7,7 +7,7 @@ ARG WORKER_UID=1000
 ARG WORKER_GID=1000
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl git jq nodejs npm socat \
+    && apt-get install -y --no-install-recommends bubblewrap ca-certificates curl git jq nodejs npm socat \
     && rm -rf /var/lib/apt/lists/* \
     && npm install --global "@openai/codex@${CODEX_VERSION}" \
     && rustup component add rustfmt clippy \
@@ -36,11 +36,13 @@ RUN apt-get update \
     && groupadd --gid "$WORKER_GID" worker \
     && useradd --uid "$WORKER_UID" --gid "$WORKER_GID" --create-home --shell /bin/sh worker
 
-USER worker
+USER root
 WORKDIR /workspaces
 
 ENV HOME=/home/worker \
     CARGO_HOME=/home/worker/.cargo \
+    SYMPHONY_AGENT_UID=1000 \
+    SYMPHONY_AGENT_GID=1000 \
     SYMPHONY_INSTALL_DIR=/tmp/symphony-runtime \
     SYMPHONY_CONTROL_ROOT=/control \
     SYMPHONY_WORKSPACE_ROOT=/workspaces
