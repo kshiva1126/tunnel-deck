@@ -101,6 +101,22 @@ version = "0.1.0"
                 self.assertEqual(review.cargo_risk("base", "head", {"Cargo.lock"}),
                                  "Cargo.lock package identities changed")
 
+    def test_lock_dependency_graph_changes_are_high_risk(self):
+        head = self.LOCK.replace(' "libc",', ' "libc 0.2.1",')
+        with patch.object(
+                review, "repository_file",
+                side_effect=lambda path, sha: self.LOCK if sha == "base" else head):
+            self.assertEqual(review.cargo_risk("base", "head", {"Cargo.lock"}),
+                             "Cargo.lock dependency graph changed")
+
+    def test_lock_dependency_order_is_normalized(self):
+        base = self.LOCK.replace(' "libc",', ' "libc",\n "second",')
+        head = self.LOCK.replace(' "libc",', ' "second",\n "libc",')
+        with patch.object(
+                review, "repository_file",
+                side_effect=lambda path, sha: base if sha == "base" else head):
+            self.assertIsNone(review.cargo_risk("base", "head", {"Cargo.lock"}))
+
     def test_manifest_non_dependency_or_complex_dependency_changes_are_high_risk(self):
         heads = {
             "feature": self.MANIFEST + '[features]\ndefault = []\n',
@@ -139,7 +155,8 @@ version = "0.1.0"
     def test_invalid_or_ambiguous_lock_is_rejected(self):
         invalid = ("", "version = 4\n[[package]]\nname = \"x\"\n",
                    self.LOCK.replace('checksum = "abc"', 'checksum = "abc"\nchecksum = "def"'),
-                   self.LOCK.replace("dependencies = [\n \"libc\",\n]", "dependencies = [\n bad\n]"))
+                   self.LOCK.replace("dependencies = [\n \"libc\",\n]", "dependencies = [\n bad\n]"),
+                   self.LOCK.replace(' "libc",', ' "libc",\n "libc",'))
         for document in invalid:
             with self.subTest(document=document):
                 with self.assertRaises(review.ReviewStopped):

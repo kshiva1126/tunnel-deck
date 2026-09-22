@@ -154,9 +154,10 @@ Cargo manifest/lock changes are not automatically supply-chain exceptions.
 The trusted review driver fetches `Cargo.lock` and, when needed, `Cargo.toml`
 from the exact PR base and head commits through GitHub. Each file must be a
 regular, base64-encoded UTF-8 response no larger than 2 MiB. It compares the
-lock package identity set `(name, version, source, checksum)`; an identical set
-allows lock rewrites that only change dependency edges or formatting, while a
-package addition/removal or any identity-field change stops at `human-review`.
+lock package identity set `(name, version, source, checksum)` and each package's
+normalized dependency references. Formatting and dependency ordering may differ,
+while a dependency-edge change, package addition/removal, or any identity-field
+change stops at `human-review`.
 
 For `Cargo.toml`, the base text must remain unchanged and in order. The only
 permitted inserted lines are unique, single-line registry dependency

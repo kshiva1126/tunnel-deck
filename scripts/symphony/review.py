@@ -272,7 +272,7 @@ def repository_file(path, commit):
 
 
 def lock_packages(document):
-    """Return Cargo's package identity set, rejecting ambiguous lock syntax."""
+    """Return Cargo's package graph, rejecting ambiguous lock syntax."""
     packages = []
     current = None
     in_dependencies = False
@@ -295,10 +295,22 @@ def lock_packages(document):
         if in_dependencies:
             if line == "]":
                 in_dependencies = False
-            elif not re.fullmatch(r'"(?:[^"\\]|\\.)*",?', line):
-                raise ReviewStopped("Cargo.lock is invalid or ambiguous")
+            else:
+                match = re.fullmatch(r'("(?:[^"\\]|\\.)*")[,]?', line)
+                if not match:
+                    raise ReviewStopped("Cargo.lock is invalid or ambiguous")
+                try:
+                    dependency = json.loads(match[1])
+                except (ValueError, TypeError):
+                    raise ReviewStopped("Cargo.lock is invalid or ambiguous") from None
+                if not dependency or dependency in current["dependencies"]:
+                    raise ReviewStopped("Cargo.lock is invalid or ambiguous")
+                current["dependencies"].append(dependency)
             continue
         if re.fullmatch(r"dependencies\s*=\s*\[", line):
+            if "dependencies" in current:
+                raise ReviewStopped("Cargo.lock is invalid or ambiguous")
+            current["dependencies"] = []
             in_dependencies = True
             continue
         match = re.fullmatch(r'(name|version|source|checksum)\s*=\s*("(?:[^"\\]|\\.)*")', line)
@@ -312,16 +324,20 @@ def lock_packages(document):
         raise ReviewStopped("Cargo.lock is invalid or ambiguous")
     if current is not None:
         packages.append(current)
-    identities = []
+    graph = {}
     for package in packages:
         if ("name" not in package or "version" not in package
-                or any(not isinstance(value, str) or not value for value in package.values())):
+                or any(not isinstance(value, str) or not value
+                       for key, value in package.items() if key != "dependencies")):
             raise ReviewStopped("Cargo.lock is invalid or ambiguous")
-        identities.append((package["name"], package["version"], package.get("source"),
-                           package.get("checksum")))
-    if not lock_version_seen or not identities or len(identities) != len(set(identities)):
+        identity = (package["name"], package["version"], package.get("source"),
+                    package.get("checksum"))
+        if identity in graph:
+            raise ReviewStopped("Cargo.lock is invalid or ambiguous")
+        graph[identity] = tuple(sorted(package.get("dependencies", [])))
+    if not lock_version_seen or not graph:
         raise ReviewStopped("Cargo.lock is invalid or ambiguous")
-    return set(identities)
+    return graph
 
 
 def manifest_dependency_additions(base, head):
@@ -358,8 +374,10 @@ def cargo_risk(base_sha, head_sha, names):
     head_lock = repository_file("Cargo.lock", head_sha)
     base_packages = lock_packages(base_lock)
     head_packages = lock_packages(head_lock)
-    if base_packages != head_packages:
+    if base_packages.keys() != head_packages.keys():
         return "Cargo.lock package identities changed"
+    if base_packages != head_packages:
+        return "Cargo.lock dependency graph changed"
     if "Cargo.toml" in names:
         additions = manifest_dependency_additions(
             repository_file("Cargo.toml", base_sha), repository_file("Cargo.toml", head_sha))
