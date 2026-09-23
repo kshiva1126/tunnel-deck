@@ -83,7 +83,7 @@ Then update from crates.io:
 cargo install tunnel-deck --locked --force
 ```
 
-To update from Git instead, reinstall the desired branch or revision:
+To update from Git instead, reinstall the latest Git revision:
 
 ```sh
 cargo install --git https://github.com/kshiva1126/tunnel-deck --locked --force
