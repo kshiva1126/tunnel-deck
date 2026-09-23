@@ -578,6 +578,35 @@ rule remains. An error after an applied but durability-uncertain removal can
 leave no rule to retry, so the TUI reports that uncertainty instead. Canceling
 the confirmation sends no mutation.
 
+GH-75 extends active editing with IPC v1 `forward_edit_active` carrying the
+complete rule observed when the form opened (`expected`) and the edited rule
+(`replacement`). The daemon compares `expected` with the current rule before
+stopping the active attempt. A mismatch returns Conflict without changing
+runtime or storage. It reserves that UUID through stop, save, and restart, so
+other clients cannot mutate or start/stop that rule midway. The daemon validates
+the candidate both before stopping and against the latest rule set immediately
+before saving; the second check preserves concurrent changes to other rules
+and returns Conflict if they now collide with the candidate.
+Opening, typing, and canceling the form have no daemon effects. The TUI skips
+its local bind probe only for its own still-active listener on the same local
+port; the daemon's start probe still detects a different listener after stop.
+
+If stopping fails, the old configuration remains and the operation reports the
+stopped runtime state. A pre-rename save failure keeps the old rule and attempts
+to restart it; restart failure is reported separately. A post-rename durability
+error means the new rule may already be on disk, so the daemon retains the new
+rule in memory, attempts its restart, and reports uncertain durability. After a
+successful save, restart failure reports the new rule as saved and forwarding
+stopped. This edit restart does not schedule automatic reconnect on failure;
+the user can explicitly start the saved rule after inspecting the error. The
+TUI reloads after every attempted save to show actual
+state. Composing separate `forward_stop` and `forward_add` client requests was
+rejected because another client's update could be silently overwritten between
+requests. Rolling back a successful save on restart failure was rejected because
+it would create a second persistence mutation with another uncertain failure
+path. Existing IPC operations, TOML schema, and SSH host-key policy remain
+unchanged. Native macOS execution and remote CI remain post-publication checks.
+
 Terminal ownership is scoped by an RAII guard. Normal/error returns restore raw
 mode, alternate screen, and cursor; the panic hook restores them before the
 original panic reporter runs, and SIGINT/SIGTERM/SIGHUP request an orderly loop

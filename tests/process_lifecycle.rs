@@ -262,6 +262,374 @@ fn rule() -> Rule {
     .unwrap()
 }
 
+#[test]
+fn active_edit_checks_snapshot_then_saves_and_restarts_exact_rule() {
+    use serde_json::json;
+    use tunnel_deck::{
+        config::{ConfigStore, Rule as WireRule},
+        daemon::{lifecycle::RequestHandler, manager::DaemonManager},
+        ipc::{ErrorCode, Operation, Request, Response},
+    };
+    let root = private_tempdir();
+    let config = root.path().join("config");
+    fs::create_dir(&config).unwrap();
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o700)).unwrap();
+    let original = rule();
+    ConfigStore::open(&config)
+        .unwrap()
+        .save(std::slice::from_ref(&original))
+        .unwrap();
+    let (ssh, log) = fake_ssh(root.path(), "trap 'exit 0' TERM; while :; do sleep 1; done");
+    let manager = DaemonManager::open_managed(
+        &config,
+        root.path().to_owned(),
+        PathBuf::from(env!("CARGO_BIN_EXE_tdeck")),
+        ssh,
+        lock(root.path()),
+        test_log(root.path()),
+    )
+    .unwrap();
+    let id = original.id().as_uuid();
+    let expected = WireRule::from(&original);
+    assert!(matches!(
+        manager.handle(&Request::new(
+            Operation::ForwardStart,
+            json!({"rule_id": id})
+        )),
+        Response::Success(_)
+    ));
+    let mut stale = expected.clone();
+    if let WireRule::Local { name, .. } = &mut stale {
+        *name = "stale".into();
+    }
+    let edit = |expected: &WireRule, replacement: &WireRule| {
+        Request::new(
+            Operation::ForwardEditActive,
+            json!({"expected": expected, "replacement": replacement}),
+        )
+    };
+    let before = fs::read_to_string(&log).unwrap();
+    assert!(
+        matches!(manager.handle(&edit(&stale, &expected)), Response::Failure(value) if value.error.code == ErrorCode::Conflict)
+    );
+    assert_eq!(
+        fs::read_to_string(&log).unwrap(),
+        before,
+        "conflict must not stop the process"
+    );
+    let mut replacement = expected.clone();
+    if let WireRule::Local { name, .. } = &mut replacement {
+        *name = "renamed".into();
+    }
+    assert!(
+        matches!(manager.handle(&edit(&expected, &replacement)), Response::Success(value) if value.result["state"] == "active")
+    );
+    let status = manager.handle(&Request::new(Operation::Status, json!({})));
+    assert!(matches!(status, Response::Success(value) if value.result["active"] == 1));
+    let listed = manager.handle(&Request::new(Operation::ForwardList, json!({})));
+    assert!(matches!(listed, Response::Success(value) if value.result[0]["name"] == "renamed"));
+    assert_eq!(
+        ConfigStore::open(&config).unwrap().load().unwrap().unwrap()[0]
+            .name()
+            .as_str(),
+        "renamed"
+    );
+    assert!(
+        fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .filter(|line| line.contains("-O forward"))
+            .count()
+            >= 2
+    );
+    assert!(
+        matches!(manager.handle(&edit(&expected, &replacement)), Response::Failure(value) if value.error.code == ErrorCode::Conflict)
+    );
+    assert!(matches!(
+        manager.handle(&Request::new(
+            Operation::ForwardStop,
+            json!({"rule_id": id})
+        )),
+        Response::Success(_)
+    ));
+}
+
+#[test]
+fn active_edit_save_failure_restarts_old_rule_and_reports_state() {
+    use serde_json::json;
+    use tunnel_deck::{
+        config::{ConfigStore, Rule as WireRule},
+        daemon::{lifecycle::RequestHandler, manager::DaemonManager},
+        ipc::{Operation, Request, Response},
+    };
+    let root = private_tempdir();
+    let config = root.path().join("config");
+    fs::create_dir(&config).unwrap();
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o700)).unwrap();
+    let original = rule();
+    ConfigStore::open(&config)
+        .unwrap()
+        .save(std::slice::from_ref(&original))
+        .unwrap();
+    let (ssh, _) = fake_ssh(root.path(), "trap 'exit 0' TERM; while :; do sleep 1; done");
+    let manager = DaemonManager::open_managed(
+        &config,
+        root.path().to_owned(),
+        PathBuf::from(env!("CARGO_BIN_EXE_tdeck")),
+        ssh,
+        lock(root.path()),
+        test_log(root.path()),
+    )
+    .unwrap();
+    let id = original.id().as_uuid();
+    assert!(matches!(
+        manager.handle(&Request::new(
+            Operation::ForwardStart,
+            json!({"rule_id": id})
+        )),
+        Response::Success(_)
+    ));
+    let expected = WireRule::from(&original);
+    let mut replacement = expected.clone();
+    if let WireRule::Local { name, .. } = &mut replacement {
+        *name = "unsaved".into();
+    }
+    fs::write(config.join("config.toml"), "invalid = [").unwrap();
+    let response = manager.handle(&Request::new(
+        Operation::ForwardEditActive,
+        json!({"expected": expected, "replacement": replacement}),
+    ));
+    assert!(
+        matches!(response, Response::Failure(value) if value.error.message.contains("old configuration restored and forwarding restarted"))
+    );
+    let status = manager.handle(&Request::new(Operation::Status, json!({})));
+    assert!(matches!(status, Response::Success(value) if value.result["active"] == 1));
+    let listed = manager.handle(&Request::new(Operation::ForwardList, json!({})));
+    assert!(matches!(listed, Response::Success(value) if value.result[0]["name"] == "web"));
+    assert!(matches!(
+        manager.handle(&Request::new(
+            Operation::ForwardStop,
+            json!({"rule_id": id})
+        )),
+        Response::Success(_)
+    ));
+}
+
+#[test]
+fn active_edit_save_and_old_restart_failure_reports_stopped_old_rule() {
+    use serde_json::json;
+    use tunnel_deck::{
+        config::{ConfigStore, Rule as WireRule},
+        daemon::{lifecycle::RequestHandler, manager::DaemonManager},
+        ipc::{Operation, Request, Response},
+    };
+    let root = private_tempdir();
+    let config = root.path().join("config");
+    fs::create_dir(&config).unwrap();
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o700)).unwrap();
+    let original = rule();
+    ConfigStore::open(&config)
+        .unwrap()
+        .save(std::slice::from_ref(&original))
+        .unwrap();
+    let reject = root.path().join("reject-restart");
+    let (ssh, _) = fake_ssh_with_check(
+        root.path(),
+        "trap 'exit 0' TERM; while :; do sleep 1; done",
+        &format!("if [ -e '{}' ]; then exit 1; fi; exit 0", reject.display()),
+    );
+    let manager = DaemonManager::open_managed(
+        &config,
+        root.path().to_owned(),
+        PathBuf::from(env!("CARGO_BIN_EXE_tdeck")),
+        ssh,
+        lock(root.path()),
+        test_log(root.path()),
+    )
+    .unwrap();
+    let id = original.id().as_uuid();
+    assert!(matches!(
+        manager.handle(&Request::new(
+            Operation::ForwardStart,
+            json!({"rule_id": id})
+        )),
+        Response::Success(_)
+    ));
+    let expected = WireRule::from(&original);
+    let mut replacement = expected.clone();
+    if let WireRule::Local { name, .. } = &mut replacement {
+        *name = "unsaved".into();
+    }
+    fs::write(config.join("config.toml"), "invalid = [").unwrap();
+    fs::write(reject, "").unwrap();
+    let response = manager.handle(&Request::new(
+        Operation::ForwardEditActive,
+        json!({"expected": expected, "replacement": replacement}),
+    ));
+    assert!(
+        matches!(response, Response::Failure(value) if value.error.message.contains("old configuration unchanged; forwarding stopped after restart failure"))
+    );
+    let status = manager.handle(&Request::new(Operation::Status, json!({})));
+    assert!(
+        matches!(status, Response::Success(value) if value.result["forwards"][0]["state"] == "stopped")
+    );
+    let listed = manager.handle(&Request::new(Operation::ForwardList, json!({})));
+    assert!(matches!(listed, Response::Success(value) if value.result[0]["name"] == "web"));
+}
+
+#[test]
+fn active_edit_restart_failure_keeps_new_saved_rule_and_reports_failure() {
+    use serde_json::json;
+    use tunnel_deck::{
+        config::{ConfigStore, Rule as WireRule},
+        daemon::{lifecycle::RequestHandler, manager::DaemonManager},
+        ipc::{Operation, Request, Response},
+    };
+    let root = private_tempdir();
+    let config = root.path().join("config");
+    fs::create_dir(&config).unwrap();
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o700)).unwrap();
+    let original = rule();
+    ConfigStore::open(&config)
+        .unwrap()
+        .save(std::slice::from_ref(&original))
+        .unwrap();
+    let reject = root.path().join("reject-restart");
+    let (ssh, _) = fake_ssh_with_check(
+        root.path(),
+        "trap 'exit 0' TERM; while :; do sleep 1; done",
+        &format!("if [ -e '{}' ]; then exit 1; fi; exit 0", reject.display()),
+    );
+    let manager = DaemonManager::open_managed(
+        &config,
+        root.path().to_owned(),
+        PathBuf::from(env!("CARGO_BIN_EXE_tdeck")),
+        ssh,
+        lock(root.path()),
+        test_log(root.path()),
+    )
+    .unwrap();
+    let id = original.id().as_uuid();
+    assert!(matches!(
+        manager.handle(&Request::new(
+            Operation::ForwardStart,
+            json!({"rule_id": id})
+        )),
+        Response::Success(_)
+    ));
+    let expected = WireRule::from(&original);
+    let mut replacement = expected.clone();
+    if let WireRule::Local { name, .. } = &mut replacement {
+        *name = "saved".into();
+    }
+    fs::write(reject, "").unwrap();
+    let response = manager.handle(&Request::new(
+        Operation::ForwardEditActive,
+        json!({"expected": expected, "replacement": replacement}),
+    ));
+    assert!(
+        matches!(response, Response::Failure(value) if value.error.message.contains("new configuration saved; forwarding stopped after restart failure"))
+    );
+    let status = manager.handle(&Request::new(Operation::Status, json!({})));
+    assert!(matches!(status, Response::Success(value) if value.result["active"] == 0));
+    let listed = manager.handle(&Request::new(Operation::ForwardList, json!({})));
+    assert!(matches!(listed, Response::Success(value) if value.result[0]["name"] == "saved"));
+    assert_eq!(
+        ConfigStore::open(&config).unwrap().load().unwrap().unwrap()[0]
+            .name()
+            .as_str(),
+        "saved"
+    );
+}
+
+#[test]
+fn active_edit_reserves_its_uuid_and_preserves_concurrent_other_rule() {
+    use serde_json::json;
+    use std::{sync::Arc, thread};
+    use tunnel_deck::{
+        config::{ConfigStore, Rule as WireRule},
+        daemon::{lifecycle::RequestHandler, manager::DaemonManager},
+        ipc::{ErrorCode, Operation, Request, Response},
+    };
+    let root = private_tempdir();
+    let config = root.path().join("config");
+    fs::create_dir(&config).unwrap();
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o700)).unwrap();
+    let original = rule();
+    ConfigStore::open(&config)
+        .unwrap()
+        .save(std::slice::from_ref(&original))
+        .unwrap();
+    let (ssh, _) = fake_ssh(root.path(), "trap '' TERM; while :; do sleep 1; done");
+    let manager = Arc::new(
+        DaemonManager::open_managed(
+            &config,
+            root.path().to_owned(),
+            PathBuf::from(env!("CARGO_BIN_EXE_tdeck")),
+            ssh,
+            lock(root.path()),
+            test_log(root.path()),
+        )
+        .unwrap(),
+    );
+    let id = original.id().as_uuid();
+    assert!(matches!(
+        manager.handle(&Request::new(
+            Operation::ForwardStart,
+            json!({"rule_id": id})
+        )),
+        Response::Success(_)
+    ));
+    let expected = WireRule::from(&original);
+    let mut replacement = expected.clone();
+    if let WireRule::Local { name, .. } = &mut replacement {
+        *name = "edited".into();
+    }
+    let editing = Arc::clone(&manager);
+    let task = thread::spawn(move || {
+        editing.handle(&Request::new(
+            Operation::ForwardEditActive,
+            json!({"expected": expected, "replacement": replacement}),
+        ))
+    });
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let status = manager.handle(&Request::new(Operation::Status, json!({})));
+        if matches!(status, Response::Success(value) if value.result["active"] == 0) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "edit did not enter stop phase");
+        thread::sleep(Duration::from_millis(10));
+    }
+    let mut competing = WireRule::from(&original);
+    if let WireRule::Local { name, .. } = &mut competing {
+        *name = "competing".into();
+    }
+    assert!(
+        matches!(manager.handle(&Request::new(Operation::ForwardAdd, json!(competing))), Response::Failure(value) if value.error.code == ErrorCode::Conflict)
+    );
+    let other_id = uuid::Uuid::new_v4();
+    let other = json!({"kind":"dynamic","id":other_id,"name":"other","ssh_host_alias":"configured-alias","bind_address":"127.0.0.1","bind_port":1088,"auto_start":false,"reconnect":false});
+    assert!(matches!(
+        manager.handle(&Request::new(Operation::ForwardAdd, other)),
+        Response::Success(_)
+    ));
+    assert!(
+        matches!(task.join().unwrap(), Response::Success(value) if value.result["state"] == "active")
+    );
+    let listed = manager.handle(&Request::new(Operation::ForwardList, json!({})));
+    assert!(
+        matches!(listed, Response::Success(value) if value.result.as_array().unwrap().len() == 2 && value.result.as_array().unwrap().iter().any(|rule| rule["id"] == other_id.to_string()))
+    );
+    assert!(matches!(
+        manager.handle(&Request::new(
+            Operation::ForwardStop,
+            json!({"rule_id": id})
+        )),
+        Response::Success(_)
+    ));
+}
+
 fn lock(root: &Path) -> std::fs::File {
     let file = OpenOptions::new()
         .read(true)
