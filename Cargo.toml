@@ -5,7 +5,12 @@ edition = "2024"
 rust-version = "1.85"
 description = "Terminal interface and CLI for managing SSH port forwarding"
 license = "MIT"
+readme = "README.md"
+homepage = "https://github.com/kshiva1126/tunnel-deck"
 repository = "https://github.com/kshiva1126/tunnel-deck"
+keywords = ["ssh", "port-forwarding", "tui", "tunnel"]
+categories = ["command-line-utilities", "network-programming"]
+publish = ["crates-io"]
 
 [[bin]]
 name = "tdeck"

@@ -6,7 +6,7 @@ controlling, and monitoring SSH port forwarding.
 - Product name: **TunnelDeck**
 - Repository and Rust package: `tunnel-deck`
 - Executable: `tdeck`
-- Planned implementation: Rust with Ratatui and Tokio
+- Implementation: Rust with Ratatui and Crossterm
 
 The goal is to make common SSH tunnel operations accessible from a coherent
 TUI while retaining a concise, scriptable CLI.
@@ -56,22 +56,18 @@ Daemon errors use stable exit statuses: 2 for invalid input, 4 for a missing
 rule, 5 for a conflict, 6 for an unavailable operation, and 70 for an internal
 failure.
 
-The exact command tree should be validated during the first implementation
-milestone rather than treated as frozen.
-
 ## Install and get started
 
 The initial distribution path is a locked source build with Cargo on Linux and
 macOS. Install Rust 1.85 and OpenSSH, then run:
 
 ```sh
-cargo install --git https://github.com/kshiva1126/tunnel-deck --locked
+cargo install tunnel-deck --locked
 tdeck --version
 ```
 
-The repository is not currently published on crates.io, so
-`cargo install tunnel-deck` is not a valid installation command. See the
-[installation guide](docs/installation.md) for installing from a clone,
+The executable is named `tdeck`. See the
+[installation guide](docs/installation.md) for installing from Git or a clone,
 updating, uninstalling, prerequisites, and SSH preparation.
 
 ## Prebuilt release artifacts
