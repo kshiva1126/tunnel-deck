@@ -31,6 +31,18 @@ jobs:
         run: python3 -m unittest discover -s tests/symphony -v
       - name: Test release packaging and dependency notices
         run: python3 -m unittest discover -s tests/release -v
+      - name: Verify Cargo package contents
+        run: |
+          package_files="$(cargo package --list)"
+          for required in README.md LICENSE Cargo.toml src/lib.rs src/main.rs; do
+            printf '%s\n' "$package_files" | grep -Fqx "$required"
+          done
+      - name: Smoke-test Cargo installation
+        run: |
+          install_root="$RUNNER_TEMP/tunnel-deck-cargo-install"
+          cargo install --path . --locked --root "$install_root"
+          "$install_root/bin/tdeck" --version
+          "$install_root/bin/tdeck" --help
       - name: Check formatting
         run: cargo fmt --check
       - name: Run Clippy

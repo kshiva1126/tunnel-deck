@@ -114,6 +114,31 @@ OS-limited rather than application-limited; future caps require a focused
 compatibility-reviewed hardening change. macOS 13 and Intel validation, signing,
 and notarization remain release-owner work.
 
+### M5 initial distribution through Cargo install
+
+The required initial distribution path is a source build with Cargo, not a
+downloaded prebuilt executable. Linux and macOS users build the selected Git
+branch with locked dependencies using the documented
+`cargo install --git ... --locked` command, or install a reviewed clone with
+`cargo install --path . --locked`. A fixed source revision requires an explicit
+`--rev <commit>`. This keeps the Rust 1.85
+and system OpenSSH prerequisites explicit. The package is not published on
+crates.io, so the shorter registry command is intentionally not documented.
+
+The ordinary Linux/macOS CI matrix installs the checkout into an isolated
+Cargo root, then runs the installed `tdeck` version and help entry points. It
+also checks `cargo package --list` for the manifest, README, MIT license, and
+binary/library source entry points. This verifies package/install mechanics;
+it does not replace native SSH, TUI, or minimum-OS acceptance.
+
+Gatekeeper, signing, and notarization govern downloaded prebuilt macOS
+binaries and are retained as future prebuilt-distribution requirements. They
+do not directly govern a binary compiled locally from source by Cargo. The
+existing archive workflow remains useful prebuilt-path evidence, but is not a
+prerequisite for satisfying the initial Cargo install distribution path. No
+application, persistence, IPC, authentication, or process-ownership boundary
+changes as a result of this distribution decision.
+
 ## One private OpenSSH master per rule
 
 Use a foreground OpenSSH master with a fresh control socket for each start

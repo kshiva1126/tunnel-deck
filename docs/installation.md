@@ -3,86 +3,87 @@
 This guide is the detailed user installation and removal reference. The
 README intentionally keeps only the shortest route here.
 
-## Supported targets and current limitations
+## Prerequisites and supported targets
 
 TunnelDeck targets Linux `x86_64`/`aarch64` and macOS Intel/Apple Silicon,
-with the baselines listed in the README. Release automation natively checks that
-each packaged executable renders version/help, completion, and manpage output.
-Broader macOS support is still under validation; see the
-[native validation checklist](macos-validation.md). In particular, macOS 13 and
-Intel hardware acceptance, signing/notarization, Gatekeeper, real SSH, and TUI
-checks remain pending.
+with the baselines listed in the README. The initial installation route builds
+from source and requires:
 
-Release archives are named `tunnel-deck-<version>-<target>.tar.gz`. Each
-contains a same-named directory with `tdeck`, `LICENSE`,
-`THIRD_PARTY_LICENSES.txt`, and `release.json`.
-The Release also provides `SHA256SUMS` and `release-manifest.json`. Select the
-target for your operating system and CPU; do not substitute an archive for
-another architecture.
+- Rust and Cargo 1.85 or newer compatible with the locked dependencies;
+- Git when installing directly from the repository URL;
+- the system OpenSSH client (`ssh`) at runtime. Apple's `/usr/bin/ssh` is the
+  baseline on macOS.
 
-## Install or update on Linux
+Cargo installs executables to `$CARGO_HOME/bin` (normally `$HOME/.cargo/bin`).
+Add that directory to `PATH` if `tdeck` is not found after installation.
+Broader native macOS support is still under validation; see the
+[native validation checklist](macos-validation.md).
 
-1. Open the desired entry on the repository's
-   [Releases page](https://github.com/kshiva1126/tunnel-deck/releases).
-2. Download `SHA256SUMS` and the archive for
-   `x86_64-unknown-linux-gnu` or `aarch64-unknown-linux-gnu`. Substitute the
-   Release version and target below, then verify and extract it:
+## Install from Git on Linux or macOS
 
-   ```sh
-   version=0.1.0
-   target=x86_64-unknown-linux-gnu
-   archive="tunnel-deck-${version}-${target}.tar.gz"
-   grep "  ${archive}$" SHA256SUMS | sha256sum --check -
-   tar -xzf "$archive"
-   ```
+Use the locked repository dependency graph:
 
-3. Install the extracted executable in a directory on `PATH`:
+```sh
+cargo install --git https://github.com/kshiva1126/tunnel-deck --locked
+tdeck --version
+tdeck --help
+```
 
-   ```sh
-   install -Dm755 "tunnel-deck-${version}-${target}/tdeck" "$HOME/.local/bin/tdeck"
-   "$HOME/.local/bin/tdeck" --version
-   ```
+TunnelDeck is not currently published on crates.io. Do not use
+`cargo install tunnel-deck`; that command would refer only to a crates.io
+package and is not the documented installation route.
 
-   Add `$HOME/.local/bin` to `PATH` if your shell does not already include it.
+## Install from an existing clone
 
-To update, stop any active forwards first, download and verify the desired
-Release, then replace the executable with the same `install` command. Starting
-the next CLI/TUI operation launches the updated per-user daemon. This explicit
-stop avoids leaving an older daemon and guardians alive while replacing the
-client binary.
+From the repository root, install the checked-out revision with the lock file:
 
-## Install or update on macOS
+```sh
+cargo install --path . --locked
+```
 
-1. Open the desired entry on the
-   [Releases page](https://github.com/kshiva1126/tunnel-deck/releases).
-2. Download `SHA256SUMS` and the archive for Apple Silicon
-   (`aarch64-apple-darwin`) or Intel (`x86_64-apple-darwin`). Substitute the
-   Release version and target below, then verify and extract it:
+For an isolated installation, add `--root <directory>`; the executable is
+written to `<directory>/bin/tdeck`. CI uses this form on both Linux and macOS
+and runs the installed executable's version and help commands.
 
-   ```sh
-   version=0.1.0
-   target=aarch64-apple-darwin
-   archive="tunnel-deck-${version}-${target}.tar.gz"
-   grep "  ${archive}$" SHA256SUMS | shasum -a 256 --check -
-   tar -xzf "$archive"
-   ```
+## Stop the daemon before update or uninstall
 
-3. Install the extracted executable:
+Stop every active rule with `tdeck forward stop <rule>` and close the TUI.
+Stopping the rules does not exit the per-user daemon. Find the exact
+`tdeck daemon run` process owned by your account, then send SIGTERM to its PID
+and confirm it has exited. For example, after replacing `12345` with the PID
+shown by the first command:
 
-   ```sh
-   mkdir -p "$HOME/.local/bin"
-   install -m755 "tunnel-deck-${version}-${target}/tdeck" "$HOME/.local/bin/tdeck"
-   "$HOME/.local/bin/tdeck" --version
-   ```
+```sh
+ps -u "$(id -un)" -o pid=,command= | grep '[t]deck daemon run'
+kill -TERM 12345
+ps -p 12345 -o pid=,command=
+```
 
-TunnelDeck is currently unsigned and not notarized. Gatekeeper can therefore
-block the downloaded executable. Inspect the Release source and checksum, then
-use Finder's per-application **Open** confirmation or the corresponding
-per-file approval in System Settings if you trust it. Do not disable
-Gatekeeper globally. Distribution signing/notarization and broader native
-acceptance checks remain release work.
+The last command should show no process. Do not run another `tdeck` command
+before replacing or removing the executable: a client command can start the
+daemon again.
 
-Update using the same stop, verify, and replacement sequence as Linux.
+## Update
+
+Follow the daemon shutdown procedure above before replacing the executable.
+Then reinstall from Git:
+
+```sh
+cargo install --git https://github.com/kshiva1126/tunnel-deck --locked --force
+```
+
+For a clone, fetch and review the desired revision, then run
+`cargo install --path . --locked --force` from its root. After the old daemon
+has exited, the next CLI or TUI operation launches the newly installed version.
+
+## Prebuilt artifacts are a separate future path
+
+The release workflow also exercises architecture-specific archives and their
+checksums, but these prebuilt binaries are not the required initial
+distribution route. A downloaded macOS binary is subject to Gatekeeper and
+requires signing/notarization policy before that path is promoted. Those
+requirements do not directly apply to a binary Cargo builds locally from
+source. Never disable Gatekeeper globally.
 
 ## Prepare SSH authentication and host keys
 
@@ -200,16 +201,19 @@ maintaining a second command specification.
 
 ## Uninstall
 
-Stop every rule first (`tdeck forward list`, then `tdeck forward stop <rule>`),
-and ensure no `tdeck` TUI is open. Remove the installed binary, completion, and
-manual files from the locations chosen above. Remove configuration and logs
-only if you do not want to retain rules or diagnostics:
+Follow the daemon shutdown procedure above, including confirming that the old
+daemon has exited. Remove the Cargo-installed executable, then
+remove completion and manual files from any locations you chose. Remove
+configuration and logs only if you do not want to retain rules or diagnostics:
 
 ```sh
-rm "$HOME/.local/bin/tdeck"
+cargo uninstall tunnel-deck
 rm -f "$HOME/.local/share/bash-completion/completions/tdeck"
 rm -f "$HOME/.local/share/man/man1/tdeck.1"
 ```
+
+If installation used `--root <directory>`, pass the same option to uninstall:
+`cargo uninstall --root <directory> tunnel-deck`.
 
 For data removal, use the paths in the preceding table (including any XDG
 overrides you selected). Runtime files normally disappear with the daemon; if

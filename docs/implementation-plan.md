@@ -377,8 +377,20 @@ completion, and manpage generation only. Signing, notarization, Gatekeeper,
 real SSH/TUI operation, and macOS 13/Intel hardware acceptance remain outside
 this automated boundary and continue under GH-51.
 
+Implementation status: GH-63 makes locked `cargo install` from Git or a local
+clone the required initial distribution path. The Linux/macOS CI matrix installs
+the checkout into an isolated root, executes the installed binary's version and
+help entry points, and verifies that Cargo packages the README, license,
+manifest, and source entry points. crates.io publication is not claimed.
+Signing, notarization, Gatekeeper, and minimum-hardware checks remain future
+prebuilt-distribution work under GH-51 rather than blockers for the source-build
+path. This supplies the distribution evidence used to assess GH-10; GH-51 is
+not part of that Cargo install acceptance boundary.
+
 Tasks:
 
+- Document and test locked Cargo installation from Git and a local clone on
+  Linux and macOS, including update and uninstall instructions.
 - Produce Linux `x86_64`/`aarch64` and macOS Intel/Apple Silicon artifacts and
   checksums. Verify linkage and minimum OS versions selected at Milestone 0.
 - Define and test macOS signing/notarization and installation handling before
@@ -391,10 +403,14 @@ Tasks:
 
 Exit criteria:
 
-- A fresh user on either OS can install its binary and complete every MVP acceptance
-  criterion from the product specification.
+- A fresh user on either OS can build and install `tdeck` through the documented
+  locked Cargo path and complete every MVP acceptance criterion from the product
+  specification.
 - Installation and upgrade are documented and reproducible.
-- Release artifacts pass native smoke tests on all four OS/architecture targets.
+- The source package includes its README, license, and required Rust sources,
+  and an isolated installed binary passes version/help smoke on Linux and macOS.
+- Prebuilt release artifacts passing native smoke on all four target
+  architectures remains a separate future distribution criterion.
 
 ## Test matrix and completion checks
 
