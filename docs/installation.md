@@ -125,6 +125,34 @@ adding the rule. The TUI may propose an available alternative, but applies it
 only after confirmation. `Active` means OpenSSH accepted the forwarding; it
 does not prove the destination service is healthy.
 
+## Preview and import SSH forwarding directives
+
+Inspect the effective `LocalForward`, `RemoteForward`, and `DynamicForward`
+directives for an SSH alias without saving them:
+
+```sh
+tdeck forward import server
+tdeck --json forward import server
+```
+
+Each candidate includes a numeric ID, forwarding type, bind, destination where
+applicable, and a supported, duplicate, conflict, unsupported, or invalid
+classification with its reason. Saving is never implicit. Pass only the IDs
+you intend to save; repeat `--select` or use a comma-separated list:
+
+```sh
+tdeck forward import server --select 1,3
+```
+
+All selected candidates are validated and saved as one operation. If any
+selection is unavailable or persistence fails before atomic replacement, none
+are saved. An uncertain-durability error means replacement completed but its
+directory sync failed; use `tdeck forward list` to inspect the reconciled batch.
+Import does not start a connection and never rewrites `~/.ssh/config`; start an
+imported rule later with `tdeck forward start <name-or-uuid>`. Shell completion
+and the generated man page include this subcommand automatically because both
+are rendered from the same command definition as `--help`.
+
 ## Configuration, logs, and runtime files
 
 | Platform | Configuration | Log |

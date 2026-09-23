@@ -393,6 +393,32 @@ destination hosts, and non-UTF-8 query output are invalid with fixed typed
 reasons. The preview retains no raw diagnostic and does not log expanded
 effective values, which may contain sensitive paths or endpoints.
 
+### M6 CLI import selection and atomic persistence
+
+`tdeck forward import <alias>` is non-interactive and previews by default.
+Candidate IDs are the one-based positions in the ordered effective-forward
+preview. Saving requires one or more explicit `--select <id>` values; repeated
+options and comma-separated IDs are accepted. Unsupported, invalid, duplicate,
+or conflicting candidates cannot be selected. Generated rule names use the
+forwarding type and bind port, with deterministic numeric suffixes when needed;
+new UUIDs are allocated only after selection. Policy values use the persisted
+new-rule defaults.
+
+The CLI obtains desired and running snapshots from the daemon, runs the bounded
+effective query, and sends all selected rules in one IPC v1 `forward_import`
+request. Adding an operation follows the existing v1 extension rule: an older
+daemon rejects the unknown operation and must be restarted or upgraded. The
+daemon converts every wire rule through the existing domain constructors,
+validates the complete resulting rule set, and calls the existing atomic config
+save once. It replaces in-memory desired state and publishes one configuration
+event only after the file is atomically replaced. A failure before replacement
+leaves memory and disk unchanged. A directory-sync failure after replacement is
+reported as uncertain durability, but the daemon reconciles memory and emits the
+event because the complete batch is already visible on disk. Repeating
+`forward_add` was rejected because a later failure could leave an earlier
+candidate saved. Import does not call start, alter running attempts, or edit SSH
+configuration.
+
 ### M2 daemon IPC foundation implementation
 
 The public daemon socket uses the existing version 1 newline-JSON contract,

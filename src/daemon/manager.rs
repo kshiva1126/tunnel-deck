@@ -1,7 +1,7 @@
 //! Daemon-owned desired configuration and idempotent runtime intent.
 
 use crate::{
-    config::{ConfigStore, ConfigV2, LogLevel, Rule as WireRule, Settings},
+    config::{ConfigStore, ConfigV2, LogLevel, Rule as WireRule, Settings, StoreError},
     daemon::{
         lifecycle::RequestHandler,
         process::{self, DiagnosticKind, ManagedAttempt},
@@ -198,14 +198,69 @@ impl DaemonManager {
                     (ErrorCode::Conflict, error.to_string())
                 })?;
                 let settings = state.settings.clone();
-                state
-                    .store
-                    .save_config(&next, &settings)
-                    .map_err(internal)?;
+                let durability_error = save_outcome(state.store.save_config(&next, &settings))?;
                 state.rules = next;
                 self.events
                     .publish("configuration_changed", json!({"rule_id": id}));
+                if let Some(error) = durability_error {
+                    return Err(error);
+                }
                 Ok(json!({"rule_id": id}))
+            }
+            Operation::ForwardImport => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct ImportPayload {
+                    rules: Vec<WireRule>,
+                }
+                let payload: ImportPayload =
+                    serde_json::from_value(request.payload.clone()).map_err(invalid)?;
+                if payload.rules.is_empty() {
+                    return Err((
+                        ErrorCode::InvalidRequest,
+                        "at least one imported rule is required".to_owned(),
+                    ));
+                }
+                let imported = payload
+                    .rules
+                    .into_iter()
+                    .map(Rule::try_from)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| (ErrorCode::InvalidRequest, error.to_string()))?;
+                let mut ids_seen = state
+                    .rules
+                    .iter()
+                    .map(|rule| rule.id().as_uuid())
+                    .collect::<HashSet<_>>();
+                if let Some(id) = imported
+                    .iter()
+                    .map(|rule| rule.id().as_uuid())
+                    .find(|id| !ids_seen.insert(*id))
+                {
+                    return Err((
+                        ErrorCode::Conflict,
+                        format!("imported rule ID already exists: {id}"),
+                    ));
+                }
+                let ids = imported
+                    .iter()
+                    .map(|rule| rule.id().as_uuid())
+                    .collect::<Vec<_>>();
+                let mut next = state.rules.clone();
+                next.extend(imported);
+                validate_rule_set(&next).map_err(|errors| {
+                    let error = crate::config::StoreError::InvalidRules(errors);
+                    (ErrorCode::Conflict, error.to_string())
+                })?;
+                let settings = state.settings.clone();
+                let durability_error = save_outcome(state.store.save_config(&next, &settings))?;
+                state.rules = next;
+                self.events
+                    .publish("configuration_changed", json!({"rule_ids": ids}));
+                if let Some(error) = durability_error {
+                    return Err(error);
+                }
+                Ok(json!({"rule_ids": ids}))
             }
             Operation::ForwardRemove => {
                 let id = rule_id(&request.payload, &state)?;
@@ -226,13 +281,13 @@ impl DaemonManager {
                     return Err((ErrorCode::NotFound, "rule was not found".to_owned()));
                 }
                 let settings = state.settings.clone();
-                state
-                    .store
-                    .save_config(&next, &settings)
-                    .map_err(internal)?;
+                let durability_error = save_outcome(state.store.save_config(&next, &settings))?;
                 state.rules = next;
                 self.events
                     .publish("configuration_changed", json!({"rule_id": id}));
+                if let Some(error) = durability_error {
+                    return Err(error);
+                }
                 Ok(json!({"rule_id": id, "removed": true}))
             }
             Operation::ForwardStart => {
@@ -246,15 +301,15 @@ impl DaemonManager {
                 let settings: Settings =
                     serde_json::from_value(request.payload.clone()).map_err(invalid)?;
                 let rules = state.rules.clone();
-                state
-                    .store
-                    .save_config(&rules, &settings)
-                    .map_err(internal)?;
+                let durability_error = save_outcome(state.store.save_config(&rules, &settings))?;
                 state.settings = settings;
                 self.events.publish(
                     "settings_changed",
                     serde_json::to_value(&state.settings).map_err(internal)?,
                 );
+                if let Some(error) = durability_error {
+                    return Err(error);
+                }
                 serde_json::to_value(&state.settings).map_err(internal)
             }
             Operation::Status => {
@@ -609,6 +664,20 @@ impl RequestHandler for DaemonManager {
 fn internal(error: impl std::fmt::Display) -> (ErrorCode, String) {
     (ErrorCode::Internal, error.to_string())
 }
+
+/// A directory-sync failure happens after the atomic rename, so callers must
+/// reconcile their in-memory state and publish the mutation before returning
+/// the durability error to the client.
+fn save_outcome(
+    result: Result<(), StoreError>,
+) -> Result<Option<(ErrorCode, String)>, (ErrorCode, String)> {
+    match result {
+        Ok(()) => Ok(None),
+        Err(error @ StoreError::DurabilityUncertain(_)) => Ok(Some(internal(error))),
+        Err(error) => Err(internal(error)),
+    }
+}
+
 fn invalid(error: impl std::fmt::Display) -> (ErrorCode, String) {
     (ErrorCode::InvalidRequest, error.to_string())
 }
@@ -919,6 +988,88 @@ mod tests {
         let saved = std::fs::read_to_string(root.path().join("config.toml")).unwrap();
         let parsed: ConfigV2 = toml::from_str(&saved).unwrap();
         assert_eq!(serde_json::to_value(parsed.settings).unwrap(), desired);
+    }
+
+    #[test]
+    fn forward_import_validates_and_persists_the_whole_batch_once() {
+        let root = private_tempdir();
+        let manager = DaemonManager::open(root.path()).unwrap();
+        let local = Uuid::new_v4();
+        let dynamic = Uuid::new_v4();
+        let payload = json!({"rules":[
+            {"kind":"local","id":local,"name":"import-local","ssh_host_alias":"host","bind_address":"127.0.0.1","bind_port":3100,"destination_host":"127.0.0.1","destination_port":3000,"auto_start":false,"reconnect":false},
+            {"kind":"dynamic","id":dynamic,"name":"import-dynamic","ssh_host_alias":"host","bind_address":"127.0.0.1","bind_port":1080,"auto_start":false,"reconnect":false}
+        ]});
+        let imported = result(manager.handle(&request(Operation::ForwardImport, payload)));
+        assert_eq!(imported["rule_ids"], json!([local, dynamic]));
+        assert_eq!(
+            result(manager.handle(&request(Operation::ForwardList, json!({}))))
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            result(manager.handle(&request(Operation::Status, json!({}))))["active"],
+            0
+        );
+    }
+
+    #[test]
+    fn forward_import_never_keeps_a_partial_batch_on_validation_or_save_failure() {
+        let root = private_tempdir();
+        let manager = DaemonManager::open(root.path()).unwrap();
+        let conflicting = json!({"rules":[
+            {"kind":"dynamic","id":Uuid::new_v4(),"name":"first","ssh_host_alias":"host","bind_address":"127.0.0.1","bind_port":1080,"auto_start":false,"reconnect":false},
+            {"kind":"local","id":Uuid::new_v4(),"name":"second","ssh_host_alias":"host","bind_address":"127.0.0.1","bind_port":1080,"destination_host":"localhost","destination_port":80,"auto_start":false,"reconnect":false}
+        ]});
+        assert_eq!(
+            failure(manager.handle(&request(Operation::ForwardImport, conflicting))).code,
+            ErrorCode::Conflict
+        );
+        assert!(
+            result(manager.handle(&request(Operation::ForwardList, json!({}))))
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+
+        std::fs::create_dir(root.path().join("config.toml")).unwrap();
+        let save_failure = json!({"rules":[
+            {"kind":"dynamic","id":Uuid::new_v4(),"name":"not-saved","ssh_host_alias":"host","bind_address":"127.0.0.1","bind_port":1081,"auto_start":false,"reconnect":false}
+        ]});
+        assert_eq!(
+            failure(manager.handle(&request(Operation::ForwardImport, save_failure))).code,
+            ErrorCode::Internal
+        );
+        assert!(
+            result(manager.handle(&request(Operation::ForwardList, json!({}))))
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn forward_import_rejects_duplicate_ids_without_mutation() {
+        let root = private_tempdir();
+        let manager = DaemonManager::open(root.path()).unwrap();
+        let id = Uuid::new_v4();
+        let payload = json!({"rules":[
+            {"kind":"remote","id":id,"name":"first","ssh_host_alias":"host","bind_address":"localhost","bind_port":4100,"destination_host":"localhost","destination_port":41,"auto_start":false,"reconnect":false},
+            {"kind":"remote","id":id,"name":"second","ssh_host_alias":"host","bind_address":"localhost","bind_port":4200,"destination_host":"localhost","destination_port":42,"auto_start":false,"reconnect":false}
+        ]});
+
+        assert_eq!(
+            failure(manager.handle(&request(Operation::ForwardImport, payload))).code,
+            ErrorCode::Conflict
+        );
+        assert!(
+            result(manager.handle(&request(Operation::ForwardList, json!({}))))
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

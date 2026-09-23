@@ -47,6 +47,8 @@ fn help_completion_and_manpage_cover_the_same_primary_commands() {
             "man page omits {command}"
         );
     }
+    assert!(String::from_utf8_lossy(&completion.stdout).contains("import"));
+    assert!(String::from_utf8_lossy(&manpage.stdout).contains("import"));
 }
 
 #[test]
@@ -138,6 +140,147 @@ fn host_list_supports_json_output() {
     assert!(output.status.success());
     let aliases: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(aliases, serde_json::json!(["api", "db", "web"]));
+}
+
+#[cfg(unix)]
+#[test]
+fn forward_import_previews_then_atomically_saves_only_explicit_supported_ids() {
+    use std::{
+        fs,
+        os::unix::fs::PermissionsExt,
+        path::Path,
+        process::{Child, Stdio},
+        thread,
+        time::{Duration, Instant},
+    };
+
+    struct Daemon(Child);
+    impl Drop for Daemon {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    fn isolated(root: &Path) -> Command {
+        let mut command = tdeck();
+        command
+            .env("HOME", root)
+            .env("XDG_CONFIG_HOME", root.join("config"))
+            .env("XDG_STATE_HOME", root.join("state"))
+            .env("XDG_RUNTIME_DIR", root.join("runtime"))
+            .env("TDECK_SSH", root.join("fake-ssh"));
+        command
+    }
+    fn run_json(root: &Path, arguments: &[&str]) -> serde_json::Value {
+        let output = isolated(root)
+            .arg("--json")
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "command failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    }
+
+    let root = tempfile::Builder::new()
+        .prefix("td-import-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    for directory in ["config", "state", "runtime", ".ssh"] {
+        fs::create_dir(root.path().join(directory)).unwrap();
+        fs::set_permissions(
+            root.path().join(directory),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+    }
+    let ssh_config = root.path().join(".ssh/config");
+    let original_config = b"Host sample\n  HostName example.invalid\n";
+    fs::write(&ssh_config, original_config).unwrap();
+    let ssh = root.path().join("fake-ssh");
+    fs::write(
+        &ssh,
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HOME/ssh-calls\"\ncase \" $* \" in\n  *\" -G \"*) cat <<'EOF'\ngatewayports no\nlocalforward 127.0.0.1:3000 127.0.0.1:30\nremoteforward 127.0.0.1:4000 127.0.0.1:40\ndynamicforward 127.0.0.1:1080\nlocalforward 127.0.0.1:3000 127.0.0.1:31\nlocalforward 0 bad\nEOF\nexit 0;;\nesac\nexit 99\n",
+    )
+    .unwrap();
+    fs::set_permissions(&ssh, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let child = isolated(root.path())
+        .args(["daemon", "run"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let _daemon = Daemon(child);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let output = isolated(root.path())
+            .args(["--json", "status"])
+            .output()
+            .unwrap();
+        if output.status.success() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "daemon did not become ready");
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    let preview = run_json(root.path(), &["forward", "import", "sample"]);
+    assert_eq!(preview["candidates"][0]["type"], "local");
+    assert_eq!(preview["candidates"][1]["type"], "remote");
+    assert_eq!(preview["candidates"][2]["type"], "dynamic");
+    assert_eq!(preview["candidates"][3]["status"], "conflict");
+    assert_eq!(preview["candidates"][4]["status"], "invalid");
+    assert!(preview["saved_rule_ids"].as_array().unwrap().is_empty());
+    assert_eq!(
+        run_json(root.path(), &["forward", "list"]),
+        serde_json::json!([])
+    );
+    let rejected = isolated(root.path())
+        .args(["forward", "import", "sample", "--select", "4"])
+        .output()
+        .unwrap();
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("candidate 4"));
+    assert_eq!(
+        run_json(root.path(), &["forward", "list"]),
+        serde_json::json!([])
+    );
+
+    let saved = run_json(
+        root.path(),
+        &[
+            "forward", "import", "sample", "--select", "1,2", "--select", "3",
+        ],
+    );
+    assert_eq!(saved["saved_rule_ids"].as_array().unwrap().len(), 3);
+    let rules = run_json(root.path(), &["forward", "list"]);
+    assert_eq!(rules.as_array().unwrap().len(), 3);
+    assert!(
+        rules
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|rule| !rule["auto_start"].as_bool().unwrap())
+    );
+    assert_eq!(fs::read(&ssh_config).unwrap(), original_config);
+    assert!(
+        fs::read_to_string(root.path().join("ssh-calls"))
+            .unwrap()
+            .lines()
+            .all(|line| line.contains(" -G ")),
+        "import must not start an SSH connection"
+    );
+
+    let duplicate = run_json(root.path(), &["forward", "import", "sample"]);
+    assert_eq!(duplicate["candidates"][0]["status"], "duplicate");
+    assert_eq!(duplicate["candidates"][1]["status"], "duplicate");
+    assert_eq!(duplicate["candidates"][2]["status"], "duplicate");
 }
 
 #[cfg(unix)]
