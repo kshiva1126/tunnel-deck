@@ -449,6 +449,19 @@ event because the complete batch is already visible on disk. Repeating
 candidate saved. Import does not call start, alter running attempts, or edit SSH
 configuration.
 
+### TUI mouse navigation
+
+The TUI enables Crossterm mouse capture together with raw mode and the
+alternate screen. Its terminal guard disables capture and restores the display
+on normal exit and input errors; the panic hook also runs the same cleanup.
+The existing keyboard path remains the fallback when a terminal sends no mouse
+events. Clicks on top tabs change pages, clicks on dashboard and host rows only
+change local selection, and wheel events move that selection. Popup mouse input,
+dragging, and action buttons are deferred to separate work. Keeping clicks
+selection-only avoids accidental daemon mutations or external browser launch.
+Hit testing uses the same bounded page layout and visible row offset as
+rendering, so resize and small-screen events cannot select hidden rows.
+
 ### M6 TUI import selection
 
 The host list and the selected rule's host can open the same effective-forward

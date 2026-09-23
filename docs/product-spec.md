@@ -180,6 +180,12 @@ q               Quit TUI, leaving daemon-managed tunnels running
 Ctrl+C          Exit safely and restore terminal
 ```
 
+On terminals that report mouse input, clicking a top tab changes the page.
+Clicking a dashboard rule row or host row selects it, and the wheel moves the
+selection in that list. A click does not start, stop, remove, edit, connect, or
+open a browser. Keyboard actions remain available when mouse input is absent.
+Popups and drag gestures are outside this mouse interaction scope.
+
 ## Explicit non-goals for the first release
 
 - A graphical desktop UI.

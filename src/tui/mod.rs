@@ -18,7 +18,10 @@ use crate::{
     },
 };
 use crossterm::{
-    event::{self, Event as InputEvent, KeyCode, KeyEvent, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event as InputEvent, KeyCode, KeyEvent,
+        KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -48,6 +51,7 @@ use std::{
 use uuid::Uuid;
 
 const LOOPBACK: &str = "127.0.0.1";
+const TAB_TITLES: [&str; 5] = ["ダッシュボード", "ホスト", "詳細", "設定", "ヘルプ"];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Page {
@@ -389,6 +393,8 @@ struct App {
     rules: Vec<RuleView>,
     selected_host: usize,
     selected_rule: usize,
+    host_offset: usize,
+    rule_offset: usize,
     selected_id: Option<Uuid>,
     form: Option<Form>,
     confirm_delete: Option<Uuid>,
@@ -406,11 +412,14 @@ impl Default for App {
             rules: vec![],
             selected_host: 0,
             selected_rule: 0,
+            host_offset: 0,
+            rule_offset: 0,
             selected_id: None,
             form: None,
             confirm_delete: None,
             import: None,
-            message: "Tab: 画面切替  ?: ヘルプ  q: 終了".into(),
+            message: "Tab/上部クリック: 画面切替  行クリック/ホイール: 選択  ?: ヘルプ  q: 終了"
+                .into(),
             settings: Settings::default(),
             settings_field: 0,
             quit: false,
@@ -439,6 +448,11 @@ impl App {
             .and_then(|id| self.rules.iter().position(|r| r.id == id))
             .unwrap_or_else(|| self.selected_rule.min(self.rules.len().saturating_sub(1)));
         self.selected_id = self.selected().map(|r| r.id)
+    }
+    fn replace_hosts(&mut self, hosts: Vec<String>) {
+        self.hosts = hosts;
+        self.selected_host = self.selected_host.min(self.hosts.len().saturating_sub(1));
+        self.host_offset = self.host_offset.min(self.selected_host);
     }
 }
 
@@ -531,7 +545,7 @@ pub fn run() -> Result<(), AppError> {
     let mut catalog = HostCatalog::new(home.join(".ssh/config"), home.join(".ssh"), "ssh");
     let mut app = App::default();
     match catalog.refresh() {
-        Ok(v) => app.hosts = v.aliases,
+        Ok(v) => app.replace_hosts(v.aliases),
         Err(e) => app.message = e.to_string(),
     }
     match service.load_rules() {
@@ -581,11 +595,124 @@ fn run_loop(
         if !event::poll(Duration::from_millis(100))? {
             continue;
         }
-        if let InputEvent::Key(key) = event::read()? {
-            handle_key(app, key, service, catalog)
+        match event::read()? {
+            InputEvent::Key(key) => handle_key(app, key, service, catalog),
+            InputEvent::Mouse(mouse) => {
+                let size = terminal.size()?;
+                handle_mouse(app, mouse, Rect::new(0, 0, size.width, size.height));
+            }
+            _ => {}
         }
     }
     Ok(())
+}
+fn screen_areas(size: Rect) -> Option<(Rect, Rect, Rect)> {
+    if size.width < 42 || size.height < 10 {
+        return None;
+    }
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(4),
+            Constraint::Length(2),
+        ])
+        .split(size);
+    Some((chunks[0], chunks[1], chunks[2]))
+}
+
+fn list_offset(selected: usize, visible: usize, offset: usize) -> usize {
+    if selected < offset {
+        selected
+    } else if selected >= offset.saturating_add(visible) {
+        selected.saturating_sub(visible.saturating_sub(1))
+    } else {
+        offset
+    }
+}
+
+fn handle_mouse(app: &mut App, mouse: MouseEvent, size: Rect) {
+    if app.form.is_some() || app.confirm_delete.is_some() || app.import.is_some() {
+        return;
+    }
+    let Some((tabs, content, _)) = screen_areas(size) else {
+        return;
+    };
+    match mouse.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            if mouse.row == tabs.y + 1 && mouse.column > tabs.x && mouse.column < tabs.right() - 1 {
+                let mut left = tabs.x + 1;
+                for (index, title) in TAB_TITLES.iter().enumerate() {
+                    let width = ratatui::text::Line::from(*title).width() as u16
+                        + if index + 1 == TAB_TITLES.len() { 2 } else { 3 };
+                    let right = left.saturating_add(width).min(tabs.right() - 1);
+                    if mouse.column >= left && mouse.column < right {
+                        app.page = [
+                            Page::Dashboard,
+                            Page::Hosts,
+                            Page::Detail,
+                            Page::Settings,
+                            Page::Help,
+                        ][index];
+                        return;
+                    }
+                    left = right;
+                }
+            }
+            if mouse.column <= content.x
+                || mouse.column >= content.right() - 1
+                || mouse.row <= content.y
+                || mouse.row >= content.bottom() - 1
+            {
+                return;
+            }
+            match app.page {
+                Page::Dashboard if mouse.row > content.y + 1 => {
+                    let visible = content.height.saturating_sub(3) as usize;
+                    let offset = list_offset(app.selected_rule, visible, app.rule_offset);
+                    let index = offset + (mouse.row - content.y - 2) as usize;
+                    if index < app.rules.len() {
+                        app.selected_rule = index;
+                        app.selected_id = Some(app.rules[index].id);
+                        app.rule_offset = offset;
+                    }
+                }
+                Page::Hosts => {
+                    let visible = content.height.saturating_sub(2) as usize;
+                    let offset = list_offset(app.selected_host, visible, app.host_offset);
+                    let index = offset + (mouse.row - content.y - 1) as usize;
+                    if index < app.hosts.len() {
+                        app.selected_host = index;
+                        app.host_offset = offset;
+                    }
+                }
+                _ => {}
+            }
+        }
+        MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
+            if content.contains((mouse.column, mouse.row).into()) =>
+        {
+            if matches!(app.page, Page::Dashboard | Page::Hosts) {
+                app.move_selection(if mouse.kind == MouseEventKind::ScrollDown {
+                    1
+                } else {
+                    -1
+                });
+                match app.page {
+                    Page::Dashboard => {
+                        let visible = content.height.saturating_sub(3) as usize;
+                        app.rule_offset = list_offset(app.selected_rule, visible, app.rule_offset);
+                    }
+                    Page::Hosts => {
+                        let visible = content.height.saturating_sub(2) as usize;
+                        app.host_offset = list_offset(app.selected_host, visible, app.host_offset);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
 }
 fn spawn_subscription(socket: PathBuf, sender: mpsc::Sender<()>) {
     thread::spawn(move || {
@@ -884,7 +1011,7 @@ fn handle_key(app: &mut App, key: KeyEvent, service: &dyn UiService, catalog: &m
         }
         KeyCode::Char('r') if app.page == Page::Hosts => match catalog.refresh() {
             Ok(v) => {
-                app.hosts = v.aliases;
+                app.replace_hosts(v.aliases);
                 app.message = "ホスト一覧を更新しました".into()
             }
             Err(e) => app.message = e.to_string(),
@@ -956,18 +1083,10 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
         );
         return;
     }
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(4),
-            Constraint::Length(2),
-        ])
-        .split(area);
-    let titles = ["ダッシュボード", "ホスト", "詳細", "設定", "ヘルプ"]
-        .into_iter()
-        .map(Line::from)
-        .collect::<Vec<_>>();
+    let Some((tabs_area, content, footer)) = screen_areas(area) else {
+        return;
+    };
+    let titles = TAB_TITLES.into_iter().map(Line::from).collect::<Vec<_>>();
     let selected = match app.page {
         Page::Dashboard => 0,
         Page::Hosts => 1,
@@ -984,10 +1103,10 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ),
-        chunks[0],
+        tabs_area,
     );
-    match app.page{Page::Dashboard=>render_dashboard(frame,chunks[1],app),Page::Hosts=>render_hosts(frame,chunks[1],app),Page::Detail=>render_detail(frame,chunks[1],app),Page::Settings=>render_settings(frame,chunks[1],app),Page::Help=>frame.render_widget(Paragraph::new("j/k・↑/↓ 選択  Enter 詳細/決定  Space 起動/停止\nn 新規  e 編集  c 複製  d 削除  r ホスト更新  i SSH転送import\nh HTTP  s HTTPS  Tab 画面切替  q 終了（転送は継続）").wrap(Wrap{trim:false}).block(Block::default().title("ヘルプ").borders(Borders::ALL)),chunks[1])}
-    frame.render_widget(Paragraph::new(app.message.as_str()), chunks[2]);
+    match app.page{Page::Dashboard=>render_dashboard(frame,content,app),Page::Hosts=>render_hosts(frame,content,app),Page::Detail=>render_detail(frame,content,app),Page::Settings=>render_settings(frame,content,app),Page::Help=>frame.render_widget(Paragraph::new("j/k・↑/↓/ホイール 選択  行クリック 選択のみ  Enter 詳細/決定  Space 起動/停止\nn 新規  e 編集  c 複製  d 削除  r ホスト更新  i SSH転送import\nh HTTP  s HTTPS  Tab/上部クリック 画面切替  q 終了（転送は継続）").wrap(Wrap{trim:false}).block(Block::default().title("ヘルプ").borders(Borders::ALL)),content)}
+    frame.render_widget(Paragraph::new(app.message.as_str()), footer);
     if let Some(form) = &app.form {
         render_form(frame, area, form)
     }
@@ -1023,7 +1142,12 @@ fn render_settings(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     );
 }
 fn render_dashboard(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
-    let rows = app.rules.iter().enumerate().map(|(i, r)| {
+    let offset = list_offset(
+        app.selected_rule,
+        area.height.saturating_sub(3) as usize,
+        app.rule_offset,
+    );
+    let rows = app.rules.iter().enumerate().skip(offset).map(|(i, r)| {
         Row::new(vec![
             Cell::from(if i == app.selected_rule { ">" } else { " " }),
             Cell::from(r.name.clone()),
@@ -1058,12 +1182,18 @@ fn render_dashboard(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     frame.render_widget(table, area)
 }
 fn render_hosts(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
+    let offset = list_offset(
+        app.selected_host,
+        area.height.saturating_sub(2) as usize,
+        app.host_offset,
+    );
     let items = if app.hosts.is_empty() {
         vec![ListItem::new("SSH config に具体的な Host がありません")]
     } else {
         app.hosts
             .iter()
             .enumerate()
+            .skip(offset)
             .map(|(i, h)| {
                 ListItem::new(format!(
                     "{} {h}",
@@ -1315,8 +1445,13 @@ struct TerminalGuard;
 impl TerminalGuard {
     fn enter() -> io::Result<Self> {
         enable_raw_mode()?;
-        if let Err(e) = execute!(io::stdout(), EnterAlternateScreen, crossterm::cursor::Hide) {
-            let _ = disable_raw_mode();
+        if let Err(e) = execute!(
+            io::stdout(),
+            EnterAlternateScreen,
+            crossterm::cursor::Hide,
+            EnableMouseCapture
+        ) {
+            restore_terminal();
             return Err(e);
         }
         Ok(Self)
@@ -1332,7 +1467,12 @@ fn restore_terminal() {
     let _ = write_terminal_restore(&mut io::stdout());
 }
 fn write_terminal_restore(writer: &mut impl io::Write) -> io::Result<()> {
-    execute!(writer, LeaveAlternateScreen, crossterm::cursor::Show)
+    execute!(
+        writer,
+        DisableMouseCapture,
+        LeaveAlternateScreen,
+        crossterm::cursor::Show
+    )
 }
 
 #[cfg(test)]
@@ -1381,6 +1521,164 @@ mod tests {
     }
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+    fn sample_rule() -> RuleView {
+        RuleView {
+            id: Uuid::new_v4(),
+            name: "web".into(),
+            host: "dev".into(),
+            bind_address: LOOPBACK.into(),
+            bind_port: 3000,
+            destination_port: Some(3000),
+            destination_host: Some(LOOPBACK.into()),
+            state: "stopped".into(),
+            kind: "local",
+            auto_start: false,
+            reconnect: false,
+            uptime_seconds: 0,
+            reconnect_count: 0,
+            last_error: None,
+        }
+    }
+
+    #[test]
+    fn mouse_tabs_select_pages_and_ignore_borders_and_popup() {
+        let mut app = App::default();
+        let size = Rect::new(0, 0, 80, 20);
+        handle_mouse(
+            &mut app,
+            mouse(MouseEventKind::Down(MouseButton::Left), 19, 1),
+            size,
+        );
+        assert_eq!(app.page, Page::Hosts);
+        handle_mouse(
+            &mut app,
+            mouse(MouseEventKind::Down(MouseButton::Left), 0, 1),
+            size,
+        );
+        assert_eq!(app.page, Page::Hosts);
+        app.form = Some(Form::new("dev".into()));
+        handle_mouse(
+            &mut app,
+            mouse(MouseEventKind::Down(MouseButton::Left), 3, 1),
+            size,
+        );
+        assert_eq!(app.page, Page::Hosts);
+        app.form = None;
+        handle_mouse(
+            &mut app,
+            mouse(MouseEventKind::Down(MouseButton::Left), 3, 1),
+            Rect::new(0, 0, 41, 20),
+        );
+        assert_eq!(app.page, Page::Hosts);
+    }
+
+    #[test]
+    fn mouse_rows_only_select_and_wheel_moves_visible_selection() {
+        let mut app = App::default();
+        app.replace_rules((0..20).map(|_| sample_rule()).collect());
+        app.hosts = (0..20).map(|i| format!("host-{i}")).collect();
+        let size = Rect::new(0, 0, 80, 12);
+        handle_mouse(
+            &mut app,
+            mouse(MouseEventKind::Down(MouseButton::Left), 5, 6),
+            size,
+        );
+        assert_eq!(app.selected_rule, 1);
+        assert_eq!(app.selected_id, Some(app.rules[1].id));
+        assert!(app.form.is_none() && app.confirm_delete.is_none() && !app.quit);
+        for _ in 0..10 {
+            handle_mouse(&mut app, mouse(MouseEventKind::ScrollDown, 5, 5), size);
+        }
+        assert_eq!(app.selected_rule, 11);
+        let offset = list_offset(app.selected_rule, 4, app.rule_offset);
+        handle_mouse(
+            &mut app,
+            mouse(MouseEventKind::Down(MouseButton::Left), 5, 5),
+            size,
+        );
+        assert_eq!(app.selected_rule, offset);
+        assert_eq!(app.rule_offset, offset, "click must preserve the viewport");
+        assert_eq!(list_offset(app.selected_rule, 4, app.rule_offset), offset);
+        handle_mouse(
+            &mut app,
+            mouse(MouseEventKind::Down(MouseButton::Left), 5, 4),
+            size,
+        );
+        assert_eq!(app.selected_rule, offset);
+        app.page = Page::Hosts;
+        handle_mouse(
+            &mut app,
+            mouse(MouseEventKind::Down(MouseButton::Left), 5, 6),
+            size,
+        );
+        assert_eq!(app.selected_host, 2);
+        handle_mouse(&mut app, mouse(MouseEventKind::ScrollUp, 5, 5), size);
+        assert_eq!(app.selected_host, 1);
+        assert!(app.form.is_none() && app.confirm_delete.is_none());
+    }
+
+    #[test]
+    fn mouse_ignores_empty_rows_and_scroll_keeps_selection_visible_after_resize() {
+        let mut app = App::default();
+        let size = Rect::new(0, 0, 42, 10);
+        handle_mouse(
+            &mut app,
+            mouse(MouseEventKind::Down(MouseButton::Left), 2, 5),
+            size,
+        );
+        assert!(app.selected_id.is_none());
+        app.hosts = (0..20).map(|i| format!("host-{i}")).collect();
+        app.page = Page::Hosts;
+        for _ in 0..19 {
+            handle_mouse(&mut app, mouse(MouseEventKind::ScrollDown, 2, 4), size);
+        }
+        assert_eq!(app.selected_host, 19);
+        let backend = TestBackend::new(42, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(
+            rendered.contains("> host-19"),
+            "selected host is hidden: {rendered}"
+        );
+        handle_mouse(
+            &mut app,
+            mouse(MouseEventKind::Down(MouseButton::Left), 2, 8),
+            size,
+        );
+        assert_eq!(app.selected_host, 19, "footer click must be ignored");
+    }
+
+    #[test]
+    fn host_refresh_clamps_selection_and_viewport() {
+        let mut app = App {
+            hosts: (0..20).map(|i| format!("host-{i}")).collect(),
+            selected_host: 19,
+            host_offset: 16,
+            ..App::default()
+        };
+        app.replace_hosts(vec!["remaining".into()]);
+        assert_eq!(app.selected_host, 0);
+        assert_eq!(app.host_offset, 0);
+        assert_eq!(list_offset(app.selected_host, 4, app.host_offset), 0);
+        app.replace_hosts(Vec::new());
+        assert_eq!(app.selected_host, 0);
+        assert_eq!(app.host_offset, 0);
     }
 
     #[test]
@@ -1682,6 +1980,8 @@ mod tests {
     fn cleanup_emits_leave_alternate_screen_and_show_cursor() {
         let mut bytes = Vec::new();
         write_terminal_restore(&mut bytes).unwrap();
+        assert!(bytes.windows(8).any(|part| part == b"\x1b[?1006l"));
+        assert!(bytes.windows(8).any(|part| part == b"\x1b[?1000l"));
         assert!(bytes.windows(7).any(|part| part == b"?1049l\x1b"));
         assert!(bytes.ends_with(b"\x1b[?25h"));
     }
