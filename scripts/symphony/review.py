@@ -27,7 +27,7 @@ MAX_CARGO_FILE_BYTES = 2 * 1024 * 1024
 DEFAULT_ATTEMPTS = 3
 DEFAULT_SECONDS = 2 * 60 * 60
 DEFAULT_POLL = 30
-DEFAULT_REMEDIATION_COMMAND = 'codex exec -c model="gpt-5.6-sol"'
+DEFAULT_REMEDIATION_COMMAND = 'codex exec -c model="gpt-6-sol"'
 SUCCESS = {"success", "neutral", "skipped"}
 SENSITIVE = re.compile(
     rb"(?i)(github_pat_[A-Za-z0-9_]{20,}|gh[opsur]_[A-Za-z0-9_]{20,}|"

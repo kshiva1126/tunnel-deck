@@ -181,7 +181,7 @@ version = "0.1.0"
                 review.remediation(ROOT, context)
             run.assert_not_called()
 
-    def test_remediation_pins_sol_and_strips_remote_credentials(self):
+    def test_remediation_pins_gpt_6_sol_and_strips_remote_credentials(self):
         completed = __import__("subprocess").CompletedProcess([], 0)
         with tempfile.TemporaryDirectory() as directory, \
                 patch.dict(os.environ, {"SYMPHONY_GITHUB_TOKEN": "secret",
@@ -191,7 +191,7 @@ version = "0.1.0"
             review.remediation(Path(directory), {"kind": "untrusted_diagnostics"})
         command = run.call_args.args[0]
         child_env = run.call_args.kwargs["env"]
-        self.assertEqual(command[:4], ["codex", "exec", "-c", 'model=gpt-5.6-sol'])
+        self.assertEqual(command[:4], ["codex", "exec", "-c", 'model=gpt-6-sol'])
         for key in ("SYMPHONY_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN", "SSH_AUTH_SOCK",
                     "GIT_DIR"):
             self.assertNotIn(key, child_env)

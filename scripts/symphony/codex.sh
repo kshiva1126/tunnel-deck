@@ -9,4 +9,4 @@ else
   set --
 fi
 exec "$@" env -u SSH_AUTH_SOCK -u SYMPHONY_GITHUB_TOKEN -u GH_TOKEN -u GITHUB_TOKEN \
-  PATH="/usr/local/cargo/bin:$PATH" codex app-server -c 'model="gpt-5.6-sol"'
+  PATH="/usr/local/cargo/bin:$PATH" codex app-server -c 'model="gpt-6-sol"'

@@ -236,28 +236,31 @@ normal recovery procedure below. A timeout has an unknown remote outcome, so
 inspect the Issue before retrying; the marker and run ID make a retry
 idempotent.
 
-## Codex model selection (GH-25)
+## Codex model selection (GH-25, GH-64)
 
 `WORKFLOW.md`'s `codex.command` invokes the trusted
 [`scripts/symphony/codex.sh`](../scripts/symphony/codex.sh) in both launch modes.
-That script is the single model setting and starts:
+That script pins the model for Issue turns and starts:
 
 ```sh
-codex app-server -c 'model="gpt-5.6-sol"'
+codex app-server -c 'model="gpt-6-sol"'
 ```
 
 The explicit CLI configuration overrides a configured or recommended model;
 see the [OpenAI configuration documentation](https://developers.openai.com/codex/config-advanced/).
-We choose Sol for the quality/usage balance of this workflow, rather than
-following future recommendation changes. No `model_reasoning_effort` override
-is added: without an explicit user configuration, Sol uses its model default.
+We choose GPT-6 Sol for the quality/usage balance of this workflow, rather than
+following future recommendation changes. The trusted review driver's default
+`codex exec` remediation command pins the same model. No
+`model_reasoning_effort` override is added: without an explicit user
+configuration, Sol uses its model default.
 Host installations still honor an explicitly configured reasoning effort.
 The Docker launcher copies only Codex authentication, not the host config.
 GitHub credential removal and Docker's UID/GID drop remain unchanged.
 
 To change the model later, edit the argument in the **trusted control
-checkout's** `scripts/symphony/codex.sh`, update the harness expectation and
-this section, then restart the worker for new sessions. Editing an issue
+checkout's** `scripts/symphony/codex.sh` and the default remediation command in
+`scripts/symphony/review.py`, update the harness expectations and this section,
+then restart the worker for new sessions. Editing an issue
 workspace does not change the running worker's `/control` checkout. Existing
 sessions are not evidence that the updated launcher has taken effect.
 
@@ -281,10 +284,10 @@ try:
             event = json.loads(line)
             if event.get("type") == "turn_context":
                 models.append(event["payload"].get("model"))
-    valid = bool(models) and all(model == "gpt-5.6-sol" for model in models)
+    valid = bool(models) and all(model == "gpt-6-sol" for model in models)
 except (OSError, ValueError, KeyError, TypeError, AttributeError):
     valid = False
-print("Verified session model: gpt-5.6-sol" if valid else "Session model not verified")
+print("Verified session model: gpt-6-sol" if valid else "Session model not verified")
 sys.exit(0 if valid else 1)
 PY
 ```
@@ -305,11 +308,12 @@ its `config/read` response confirmed `model = "gpt-5.6-sol"`. Only that model
 confirmation was printed; no inference turn or GitHub operation was requested.
 Shell syntax and diff whitespace checks passed.
 
-Deployment acceptance evidence must come from a new **Symphony-dispatched**
-session using the updated trusted control checkout. Record that evidence on
-GH-25 after merging and restarting the worker; a run from the issue workspace
-itself still uses the pre-change control checkout. Native Docker isolation and
-macOS are covered by the remote Linux/macOS checks after publication.
+The GH-25 evidence above records the previous model. For GH-64, deployment
+acceptance evidence must come from a new **Symphony-dispatched** session using
+the updated trusted control checkout after merge and worker restart. A run from
+an issue workspace itself still uses the pre-change control checkout. Native
+Docker isolation and macOS are covered by the remote Linux/macOS checks after
+publication.
 
 ## Dependency admission and replay protection (GH-24)
 
