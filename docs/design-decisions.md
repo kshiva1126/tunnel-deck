@@ -593,8 +593,9 @@ port; the daemon's start probe still detects a different listener after stop.
 
 If stopping fails, the old configuration remains. The daemon removes its
 runtime attempt and attempts forced cleanup, but cannot prove that the listener
-has stopped when cleanup reports an error; the operation reports the forwarding
-state as uncertain rather than claiming it is stopped. A pre-rename save failure
+has stopped when cleanup reports an error. It records a failed runtime state
+with a fixed uncertainty diagnostic rather than claiming the listener stopped.
+A pre-rename save failure
 keeps the old rule and attempts to restart it; restart failure is reported
 separately. A post-rename durability
 error means the new rule may already be on disk, so the daemon retains the new

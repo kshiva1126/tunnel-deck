@@ -620,6 +620,18 @@ impl DaemonManager {
             return Err((ErrorCode::Internal, "active attempt disappeared".to_owned()));
         };
         if let Err(error) = attempt.stop() {
+            if let Ok(mut state) = self.state.lock() {
+                state.running.insert(id, Attempt::Failed);
+                state.diagnostics.entry(id).or_default().last_error = Some(LastError {
+                    kind: DiagnosticKind::Unknown,
+                    message: "stop failed; forwarding state uncertain".to_owned(),
+                });
+            }
+            self.log_event(
+                LogLevel::Error,
+                &format!("event=rule_failed rule_id={id} diagnostic_kind=unknown diagnostic=stop failed; forwarding state uncertain"),
+            );
+            self.events.publish("rule_failed", json!({"rule_id": id}));
             self.finish_edit(id);
             return Err((
                 ErrorCode::Internal,
@@ -1075,6 +1087,12 @@ mod tests {
         assert_eq!(
             result(manager.handle(&request(Operation::Status, json!({}))))["active"],
             0
+        );
+        let status = result(manager.handle(&request(Operation::Status, json!({}))));
+        assert_eq!(status["forwards"][0]["state"], "failed");
+        assert_eq!(
+            status["forwards"][0]["last_error"],
+            "stop failed; forwarding state uncertain"
         );
     }
 
