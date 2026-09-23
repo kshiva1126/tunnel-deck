@@ -1125,7 +1125,7 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
             ),
         tabs_area,
     );
-    match app.page{Page::Dashboard=>render_dashboard(frame,content,app),Page::Hosts=>render_hosts(frame,content,app),Page::Detail=>render_detail(frame,content,app),Page::Settings=>render_settings(frame,content,app),Page::Help=>frame.render_widget(Paragraph::new("j/k・↑/↓/ホイール 選択  行クリック 選択のみ  Enter 詳細/決定  Space 起動/停止\nn 新規  e 編集  c 複製  d 削除  r ホスト更新  i SSH転送import\nEsc nから開いたホスト一覧から戻る（フォーム・importでは閉じる）\nh HTTP  s HTTPS  Tab/上部クリック 画面切替  q 終了（転送は継続）").wrap(Wrap{trim:false}).block(Block::default().title("ヘルプ").borders(Borders::ALL)),content)}
+    match app.page{Page::Dashboard=>render_dashboard(frame,content,app),Page::Hosts=>render_hosts(frame,content,app),Page::Detail=>render_detail(frame,content,app),Page::Settings=>render_settings(frame,content,app),Page::Help=>frame.render_widget(Paragraph::new("Esc: nで開いたホスト一覧から戻る\nj/k・↑/↓/ホイール 選択  行クリック 選択のみ  Enter 詳細/決定  Space 起動/停止\nn 新規  e 編集  c 複製  d 削除  r ホスト更新  i SSH転送import\nh HTTP  s HTTPS  Tab/上部クリック 画面切替  q 終了（転送は継続）").wrap(Wrap{trim:false}).block(Block::default().title("ヘルプ").borders(Borders::ALL)),content)}
     let hint = page_hint(app, footer.width);
     frame.render_widget(Paragraph::new(format!("{hint}\n{}", app.message)), footer);
     if let Some(form) = &app.form {
@@ -1689,8 +1689,13 @@ mod tests {
         );
         handle_key(&mut app, key(KeyCode::Char('?')), &service, &mut catalog);
         assert_eq!(app.page, Page::Help);
-        let screen = rendered(&app, 80);
-        assert!(screen.contains("Escnから開いたホスト一覧から戻る"));
+        for width in [80, 42] {
+            let screen = rendered(&app, width);
+            assert!(
+                screen.contains("Esc:nで開いたホスト一覧から戻る"),
+                "{width}: {screen}"
+            );
+        }
     }
 
     #[test]
