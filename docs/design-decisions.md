@@ -602,8 +602,9 @@ rule in memory, attempts its restart, and reports uncertain durability. After a
 successful save, restart failure reports the new rule as saved and forwarding
 stopped. This edit restart does not schedule automatic reconnect on failure;
 the user can explicitly start the saved rule after inspecting the error. The
-TUI reloads after every attempted save to show actual state. If reloading
-fails, it does not claim that the displayed state is current and asks the user
+TUI reloads both desired rules and daemon runtime status after every attempted
+save to show actual state. If either reload fails, it does not claim that the
+displayed state is current and asks the user
 to reconnect and verify. Composing separate `forward_stop` and `forward_add`
 client requests was
 rejected because another client's update could be silently overwritten between

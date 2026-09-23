@@ -572,27 +572,9 @@ impl UiService for Service {
         let wire: Vec<WireRule> =
             serde_json::from_value(self.call(Operation::ForwardList, json!({}))?)
                 .map_err(|e| e.to_string())?;
-        let mut rules: Vec<_> = wire.into_iter().map(RuleView::from_wire).collect();
-        if let Ok(status) = self.call(Operation::Status, json!({})) {
-            if let Some(states) = status["forwards"].as_array() {
-                for state in states {
-                    if let (Some(id), Some(value)) = (
-                        state["rule_id"]
-                            .as_str()
-                            .and_then(|v| Uuid::parse_str(v).ok()),
-                        state["state"].as_str(),
-                    ) {
-                        if let Some(rule) = rules.iter_mut().find(|r| r.id == id) {
-                            rule.state = value.into();
-                            rule.uptime_seconds = state["uptime_seconds"].as_u64().unwrap_or(0);
-                            rule.reconnect_count = state["reconnect_count"].as_u64().unwrap_or(0);
-                            rule.last_error = state["last_error"].as_str().map(str::to_owned);
-                        }
-                    }
-                }
-            }
-        }
-        Ok(rules)
+        let status = self.call(Operation::Status, json!({}))?;
+        let rules = wire.into_iter().map(RuleView::from_wire).collect();
+        apply_runtime_status(rules, &status)
     }
     fn load_settings(&self) -> Result<Settings, String> {
         serde_json::from_value(self.call(Operation::SettingsGet, json!({}))?)
@@ -603,6 +585,27 @@ impl UiService for Service {
         serde_json::from_value(self.call(Operation::SettingsUpdate, payload)?)
             .map_err(|error| error.to_string())
     }
+}
+
+fn apply_runtime_status(mut rules: Vec<RuleView>, status: &Value) -> Result<Vec<RuleView>, String> {
+    let states = status["forwards"]
+        .as_array()
+        .ok_or("daemon status did not include forwarding states")?;
+    for rule in &mut rules {
+        let id = rule.id.to_string();
+        let state = states
+            .iter()
+            .find(|state| state["rule_id"].as_str() == Some(id.as_str()))
+            .ok_or("daemon status did not include a listed rule")?;
+        rule.state = state["state"]
+            .as_str()
+            .ok_or("daemon status did not include a rule state")?
+            .into();
+        rule.uptime_seconds = state["uptime_seconds"].as_u64().unwrap_or(0);
+        rule.reconnect_count = state["reconnect_count"].as_u64().unwrap_or(0);
+        rule.last_error = state["last_error"].as_str().map(str::to_owned);
+    }
+    Ok(rules)
 }
 
 pub fn run() -> Result<(), AppError> {
@@ -2530,6 +2533,24 @@ mod tests {
             }));
             assert!(rendered(&app, 42).contains("再接続して確認"));
         }
+    }
+    #[test]
+    fn rule_reload_requires_runtime_status_for_every_listed_rule() {
+        let rule = sample_rule();
+        let status = json!({"forwards":[{"rule_id":rule.id,"state":"active","uptime_seconds":7,"reconnect_count":2}]});
+        let loaded = apply_runtime_status(vec![rule.clone()], &status).unwrap();
+        assert_eq!(loaded[0].state, "active");
+        assert_eq!(loaded[0].uptime_seconds, 7);
+        assert_eq!(loaded[0].reconnect_count, 2);
+        assert!(apply_runtime_status(vec![rule.clone()], &json!({})).is_err());
+        assert!(apply_runtime_status(vec![rule.clone()], &json!({"forwards":[]})).is_err());
+        assert!(
+            apply_runtime_status(
+                vec![rule],
+                &json!({"forwards":[{"rule_id":status["forwards"][0]["rule_id"]}]})
+            )
+            .is_err()
+        );
     }
     #[test]
     fn suggestion_shortcut_does_not_consume_a_in_the_name_field() {
