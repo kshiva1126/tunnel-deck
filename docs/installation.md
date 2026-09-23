@@ -45,18 +45,36 @@ For an isolated installation, add `--root <directory>`; the executable is
 written to `<directory>/bin/tdeck`. CI uses this form on both Linux and macOS
 and runs the installed executable's version and help commands.
 
+## Stop the daemon before update or uninstall
+
+Stop every active rule with `tdeck forward stop <rule>` and close the TUI.
+Stopping the rules does not exit the per-user daemon. Find the exact
+`tdeck daemon run` process owned by your account, then send SIGTERM to its PID
+and confirm it has exited. For example, after replacing `12345` with the PID
+shown by the first command:
+
+```sh
+ps -u "$(id -un)" -o pid=,command= | grep '[t]deck daemon run'
+kill -TERM 12345
+ps -p 12345 -o pid=,command=
+```
+
+The last command should show no process. Do not run another `tdeck` command
+before replacing or removing the executable: a client command can start the
+daemon again.
+
 ## Update
 
-Stop active forwards before replacing the executable so an older daemon and
-guardians are not left running beside a newer client. Then reinstall from Git:
+Follow the daemon shutdown procedure above before replacing the executable.
+Then reinstall from Git:
 
 ```sh
 cargo install --git https://github.com/kshiva1126/tunnel-deck --locked --force
 ```
 
 For a clone, fetch and review the desired revision, then run
-`cargo install --path . --locked --force` from its root. The next CLI or TUI
-operation launches the newly installed per-user daemon.
+`cargo install --path . --locked --force` from its root. After the old daemon
+has exited, the next CLI or TUI operation launches the newly installed version.
 
 ## Prebuilt artifacts are a separate future path
 
@@ -183,8 +201,8 @@ maintaining a second command specification.
 
 ## Uninstall
 
-Stop every rule first (`tdeck forward list`, then `tdeck forward stop <rule>`),
-and ensure no `tdeck` TUI is open. Remove the Cargo-installed executable, then
+Follow the daemon shutdown procedure above, including confirming that the old
+daemon has exited. Remove the Cargo-installed executable, then
 remove completion and manual files from any locations you chose. Remove
 configuration and logs only if you do not want to retain rules or diagnostics:
 

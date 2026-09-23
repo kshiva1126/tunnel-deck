@@ -117,9 +117,11 @@ and notarization remain release-owner work.
 ### M5 initial distribution through Cargo install
 
 The required initial distribution path is a source build with Cargo, not a
-downloaded prebuilt executable. Linux and macOS users install the locked Git
-revision with the documented `cargo install --git ... --locked` command, or a
-reviewed clone with `cargo install --path . --locked`. This keeps the Rust 1.85
+downloaded prebuilt executable. Linux and macOS users build the selected Git
+branch with locked dependencies using the documented
+`cargo install --git ... --locked` command, or install a reviewed clone with
+`cargo install --path . --locked`. A fixed source revision requires an explicit
+`--rev <commit>`. This keeps the Rust 1.85
 and system OpenSSH prerequisites explicit. The package is not published on
 crates.io, so the shorter registry command is intentionally not documented.
 
