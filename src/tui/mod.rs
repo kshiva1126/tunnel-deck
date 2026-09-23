@@ -398,12 +398,17 @@ struct App {
     rule_offset: usize,
     selected_id: Option<Uuid>,
     form: Option<Form>,
-    confirm_delete: Option<Uuid>,
+    confirm_delete: Option<DeleteConfirmation>,
     import: Option<ImportPanel>,
     message: String,
     settings: Settings,
     settings_field: usize,
     quit: bool,
+}
+#[derive(Clone, Copy, Debug)]
+struct DeleteConfirmation {
+    id: Uuid,
+    stop_first: bool,
 }
 impl Default for App {
     fn default() -> Self {
@@ -889,17 +894,43 @@ fn handle_key(app: &mut App, key: KeyEvent, service: &dyn UiService, catalog: &m
         handle_import_key(app, key, service);
         return;
     }
-    if let Some(id) = app.confirm_delete {
+    if let Some(confirmation) = app.confirm_delete {
         match key.code {
             KeyCode::Char('y') | KeyCode::Enter => {
-                match service.call(Operation::ForwardRemove, json!({"rule_id":id})) {
-                    Ok(_) => {
-                        app.message = "転送を削除しました".into();
-                        refresh(app, service)
+                app.confirm_delete = None;
+                if confirmation.stop_first {
+                    if let Err(error) =
+                        service.call(Operation::ForwardStop, json!({"rule_id": confirmation.id}))
+                    {
+                        refresh(app, service);
+                        app.message = format!(
+                            "停止できませんでした: {error}。状態を確認して再試行してください"
+                        );
+                        return;
                     }
-                    Err(e) => app.message = e,
                 }
-                app.confirm_delete = None
+                match service.call(
+                    Operation::ForwardRemove,
+                    json!({"rule_id": confirmation.id}),
+                ) {
+                    Ok(_) => {
+                        refresh(app, service);
+                        app.message = "転送を削除しました".into();
+                    }
+                    Err(error) => {
+                        app.message = match service.load_rules() {
+                            Ok(rules) => {
+                                app.replace_rules(rules);
+                                format!(
+                                    "削除できませんでした: {error}。残った転送の状態を確認し、d で再試行してください"
+                                )
+                            }
+                            Err(refresh_error) => format!(
+                                "削除できませんでした: {error}。状態の再取得も失敗しました: {refresh_error}。再接続後に状態を確認してください"
+                            ),
+                        };
+                    }
+                }
             }
             KeyCode::Char('n') | KeyCode::Esc => app.confirm_delete = None,
             _ => {}
@@ -1060,9 +1091,12 @@ fn handle_key(app: &mut App, key: KeyEvent, service: &dyn UiService, catalog: &m
                 app.form = Some(Form::duplicate(&rule))
             }
         }
-        KeyCode::Char('d') => {
+        KeyCode::Char('d') if matches!(app.page, Page::Dashboard | Page::Detail) => {
             if let Some(rule) = app.selected() {
-                app.confirm_delete = Some(rule.id)
+                app.confirm_delete = Some(DeleteConfirmation {
+                    id: rule.id,
+                    stop_first: rule.state != "stopped",
+                })
             }
         }
         KeyCode::Char(' ') => {
@@ -1125,14 +1159,18 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
             ),
         tabs_area,
     );
-    match app.page{Page::Dashboard=>render_dashboard(frame,content,app),Page::Hosts=>render_hosts(frame,content,app),Page::Detail=>render_detail(frame,content,app),Page::Settings=>render_settings(frame,content,app),Page::Help=>frame.render_widget(Paragraph::new("Esc: nで開いたホスト一覧から戻る\nj/k・↑/↓/ホイール 選択  行クリック 選択のみ  Enter 詳細/決定  Space 起動/停止\nn 新規  e 編集  c 複製  d 削除  r ホスト更新  i SSH転送import\nh HTTP  s HTTPS  Tab/上部クリック 画面切替  q 終了（転送は継続）").wrap(Wrap{trim:false}).block(Block::default().title("ヘルプ").borders(Borders::ALL)),content)}
+    match app.page{Page::Dashboard=>render_dashboard(frame,content,app),Page::Hosts=>render_hosts(frame,content,app),Page::Detail=>render_detail(frame,content,app),Page::Settings=>render_settings(frame,content,app),Page::Help=>frame.render_widget(Paragraph::new("Esc: nで開いたホスト一覧から戻る\nj/k・↑/↓/ホイール 選択  行クリック 選択のみ  Enter 詳細/決定  Space 起動/停止\nn 新規  e 編集  c 複製  d 削除（稼働中は停止後・確認あり／ダッシュボードと詳細）\nr ホスト更新  i SSH転送import  h HTTP  s HTTPS\nTab/上部クリック 画面切替  q 終了（転送は継続）").wrap(Wrap{trim:false}).block(Block::default().title("ヘルプ").borders(Borders::ALL)),content)}
     let hint = page_hint(app, footer.width);
     frame.render_widget(Paragraph::new(format!("{hint}\n{}", app.message)), footer);
     if let Some(form) = &app.form {
         render_form(frame, area, form)
     }
     if app.confirm_delete.is_some() {
-        render_confirm(frame, area)
+        render_confirm(
+            frame,
+            area,
+            app.confirm_delete.is_some_and(|c| c.stop_first),
+        )
     }
     if let Some(import) = &app.import {
         render_import(frame, area, import)
@@ -1441,12 +1479,16 @@ fn render_form(frame: &mut ratatui::Frame<'_>, area: Rect, form: &Form) {
         popup,
     )
 }
-fn render_confirm(frame: &mut ratatui::Frame<'_>, area: Rect) {
+fn render_confirm(frame: &mut ratatui::Frame<'_>, area: Rect, stop_first: bool) {
     let popup = centered(area, 46, 5);
     frame.render_widget(Clear, popup);
     frame.render_widget(
-        Paragraph::new("この転送を削除しますか？\ny/Enter: 削除  n/Esc: 戻る")
-            .block(Block::default().title("削除確認").borders(Borders::ALL)),
+        Paragraph::new(if stop_first {
+            "この転送を停止して削除しますか？\ny/Enter: 停止して削除  n/Esc: 戻る"
+        } else {
+            "この転送を削除しますか？\ny/Enter: 削除  n/Esc: 戻る"
+        })
+        .block(Block::default().title("削除確認").borders(Borders::ALL)),
         popup,
     )
 }
@@ -1590,6 +1632,206 @@ mod tests {
             reconnect_count: 0,
             last_error: None,
         }
+    }
+
+    #[derive(Default)]
+    struct DeleteService {
+        calls: RefCell<Vec<(Operation, Uuid)>>,
+        rules: RefCell<Vec<RuleView>>,
+        stop_error: Option<String>,
+        remove_error: Option<String>,
+        load_error: Option<String>,
+    }
+    impl UiService for DeleteService {
+        fn call(&self, operation: Operation, payload: Value) -> Result<Value, String> {
+            let id: Uuid = serde_json::from_value(payload["rule_id"].clone()).unwrap();
+            self.calls.borrow_mut().push((operation, id));
+            match operation {
+                Operation::ForwardStop => {
+                    if let Some(error) = &self.stop_error {
+                        return Err(error.clone());
+                    }
+                    self.rules
+                        .borrow_mut()
+                        .iter_mut()
+                        .find(|rule| rule.id == id)
+                        .unwrap()
+                        .state = "stopped".into();
+                }
+                Operation::ForwardRemove => {
+                    if let Some(error) = &self.remove_error {
+                        return Err(error.clone());
+                    }
+                    self.rules.borrow_mut().retain(|rule| rule.id != id);
+                }
+                _ => panic!("unexpected operation: {operation:?}"),
+            }
+            Ok(json!({}))
+        }
+        fn load_rules(&self) -> Result<Vec<RuleView>, String> {
+            self.load_error
+                .clone()
+                .map_or_else(|| Ok(self.rules.borrow().clone()), Err)
+        }
+        fn load_settings(&self) -> Result<Settings, String> {
+            Ok(Settings::default())
+        }
+        fn save_settings(&self, _: &Settings) -> Result<Settings, String> {
+            unreachable!()
+        }
+    }
+    fn test_catalog() -> HostCatalog {
+        HostCatalog::new(
+            PathBuf::from("/nonexistent/config"),
+            PathBuf::from("/nonexistent/ssh"),
+            "ssh",
+        )
+    }
+
+    #[test]
+    fn active_delete_confirms_before_stopping_and_removes_exact_uuid() {
+        for page in [Page::Dashboard, Page::Detail] {
+            for accept in [KeyCode::Enter, KeyCode::Char('y')] {
+                let mut other = sample_rule();
+                other.name = "other".into();
+                let mut target = sample_rule();
+                target.state = "active".into();
+                let id = target.id;
+                let service = DeleteService {
+                    rules: RefCell::new(vec![other.clone(), target.clone()]),
+                    ..DeleteService::default()
+                };
+                let mut app = App {
+                    page,
+                    rules: vec![other.clone(), target],
+                    selected_rule: 1,
+                    ..App::default()
+                };
+                let mut catalog = test_catalog();
+                handle_key(&mut app, key(KeyCode::Char('d')), &service, &mut catalog);
+                assert!(rendered(&app, 80).contains("停止して削除"));
+                assert_eq!(service.rules.borrow().len(), 2);
+                assert_eq!(service.rules.borrow()[1].state, "active");
+                assert!(service.calls.borrow().is_empty());
+                handle_key(&mut app, key(accept), &service, &mut catalog);
+                assert_eq!(
+                    *service.calls.borrow(),
+                    vec![(Operation::ForwardStop, id), (Operation::ForwardRemove, id)]
+                );
+                assert_eq!(service.rules.borrow().len(), 1);
+                assert_eq!(service.rules.borrow()[0].id, other.id);
+                assert_eq!(app.rules.len(), 1);
+                assert!(app.confirm_delete.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn stopped_single_rule_deletes_after_confirmation_and_cancel_changes_nothing() {
+        for cancel in [KeyCode::Esc, KeyCode::Char('n')] {
+            let rule = sample_rule();
+            let service = DeleteService {
+                rules: RefCell::new(vec![rule.clone()]),
+                ..DeleteService::default()
+            };
+            let mut app = App {
+                rules: vec![rule.clone()],
+                ..App::default()
+            };
+            let mut catalog = test_catalog();
+            handle_key(&mut app, key(KeyCode::Char('d')), &service, &mut catalog);
+            assert!(rendered(&app, 80).contains("この転送を削除しますか"));
+            assert!(!rendered(&app, 80).contains("この転送を停止して削除しますか"));
+            handle_key(&mut app, key(cancel), &service, &mut catalog);
+            assert_eq!(app.rules.len(), 1);
+            assert_eq!(service.rules.borrow().len(), 1);
+            assert!(service.calls.borrow().is_empty());
+            handle_key(&mut app, key(KeyCode::Char('d')), &service, &mut catalog);
+            handle_key(&mut app, key(KeyCode::Enter), &service, &mut catalog);
+            assert_eq!(
+                *service.calls.borrow(),
+                vec![(Operation::ForwardRemove, rule.id)]
+            );
+            assert!(app.rules.is_empty());
+        }
+    }
+
+    #[test]
+    fn delete_failures_keep_rule_and_refresh_its_state() {
+        for stop_fails in [true, false] {
+            let mut rule = sample_rule();
+            rule.state = "active".into();
+            let service = DeleteService {
+                rules: RefCell::new(vec![rule.clone()]),
+                stop_error: stop_fails.then(|| "stop rejected".into()),
+                remove_error: (!stop_fails).then(|| "save rejected".into()),
+                ..DeleteService::default()
+            };
+            let mut app = App {
+                rules: vec![rule.clone()],
+                ..App::default()
+            };
+            let mut catalog = test_catalog();
+            handle_key(&mut app, key(KeyCode::Char('d')), &service, &mut catalog);
+            handle_key(&mut app, key(KeyCode::Char('y')), &service, &mut catalog);
+            assert_eq!(app.rules.len(), 1);
+            assert_eq!(service.rules.borrow().len(), 1);
+            assert_eq!(
+                app.rules[0].state,
+                if stop_fails { "active" } else { "stopped" }
+            );
+            assert_eq!(service.calls.borrow().len(), if stop_fails { 1 } else { 2 });
+            assert!(app.message.contains(if stop_fails {
+                "停止できませんでした"
+            } else {
+                "削除できませんでした"
+            }));
+            assert!(app.message.contains("再試行"));
+        }
+    }
+
+    #[test]
+    fn remove_failure_with_refresh_failure_reports_unknown_state() {
+        let mut rule = sample_rule();
+        rule.state = "active".into();
+        let service = DeleteService {
+            rules: RefCell::new(vec![rule.clone()]),
+            remove_error: Some("save rejected".into()),
+            load_error: Some("disconnected".into()),
+            ..DeleteService::default()
+        };
+        let mut app = App {
+            rules: vec![rule.clone()],
+            ..App::default()
+        };
+        let mut catalog = test_catalog();
+        handle_key(&mut app, key(KeyCode::Char('d')), &service, &mut catalog);
+        handle_key(&mut app, key(KeyCode::Enter), &service, &mut catalog);
+        assert_eq!(service.rules.borrow()[0].state, "stopped");
+        assert_eq!(app.rules[0].state, "active");
+        assert!(app.message.contains("状態の再取得も失敗"));
+        assert!(app.message.contains("再接続後に状態を確認"));
+    }
+
+    #[test]
+    fn delete_key_on_pages_without_visible_rules_does_not_open_confirmation() {
+        let rule = sample_rule();
+        let service = DeleteService {
+            rules: RefCell::new(vec![rule.clone()]),
+            ..DeleteService::default()
+        };
+        let mut app = App {
+            rules: vec![rule],
+            ..App::default()
+        };
+        let mut catalog = test_catalog();
+        for page in [Page::Hosts, Page::Settings, Page::Help] {
+            app.show_page(page);
+            handle_key(&mut app, key(KeyCode::Char('d')), &service, &mut catalog);
+            assert!(app.confirm_delete.is_none());
+        }
+        assert!(service.calls.borrow().is_empty());
+        assert_eq!(service.rules.borrow().len(), 1);
     }
 
     fn rendered(app: &App, width: u16) -> String {
