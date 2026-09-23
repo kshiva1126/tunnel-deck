@@ -591,16 +591,21 @@ Opening, typing, and canceling the form have no daemon effects. The TUI skips
 its local bind probe only for its own still-active listener on the same local
 port; the daemon's start probe still detects a different listener after stop.
 
-If stopping fails, the old configuration remains and the operation reports the
-stopped runtime state. A pre-rename save failure keeps the old rule and attempts
-to restart it; restart failure is reported separately. A post-rename durability
+If stopping fails, the old configuration remains. The daemon removes its
+runtime attempt and attempts forced cleanup, but cannot prove that the listener
+has stopped when cleanup reports an error; the operation reports the forwarding
+state as uncertain rather than claiming it is stopped. A pre-rename save failure
+keeps the old rule and attempts to restart it; restart failure is reported
+separately. A post-rename durability
 error means the new rule may already be on disk, so the daemon retains the new
 rule in memory, attempts its restart, and reports uncertain durability. After a
 successful save, restart failure reports the new rule as saved and forwarding
 stopped. This edit restart does not schedule automatic reconnect on failure;
 the user can explicitly start the saved rule after inspecting the error. The
-TUI reloads after every attempted save to show actual
-state. Composing separate `forward_stop` and `forward_add` client requests was
+TUI reloads after every attempted save to show actual state. If reloading
+fails, it does not claim that the displayed state is current and asks the user
+to reconnect and verify. Composing separate `forward_stop` and `forward_add`
+client requests was
 rejected because another client's update could be silently overwritten between
 requests. Rolling back a successful save on restart failure was rejected because
 it would create a second persistence mutation with another uncertain failure

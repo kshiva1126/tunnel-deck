@@ -1023,12 +1023,24 @@ fn handle_key(app: &mut App, key: KeyEvent, service: &dyn UiService, catalog: &m
                             json!({"expected": expected, "replacement": payload}),
                         );
                         app.form = None;
-                        refresh(app, service);
-                        app.message = match outcome {
-                            Ok(_) => "転送を保存して再起動しました".into(),
-                            Err(error) => {
-                                format!("編集結果: {error}。一覧で状態を確認してください")
+                        let refreshed = service.load_rules();
+                        if let Ok(rules) = &refreshed {
+                            app.replace_rules(rules.clone());
+                        }
+                        if let Ok(settings) = service.load_settings() {
+                            app.settings = settings;
+                        }
+                        app.message = match (outcome, refreshed) {
+                            (Ok(_), Ok(_)) => "転送を保存して再起動しました".into(),
+                            (Err(error), Ok(_)) => {
+                                format!("編集結果を一覧で確認: {error}")
                             }
+                            (Ok(_), Err(refresh_error)) => {
+                                format!("表示更新失敗。再接続して確認: {refresh_error}")
+                            }
+                            (Err(error), Err(refresh_error)) => format!(
+                                "状態不明。再接続して確認: {error}; 再取得失敗: {refresh_error}"
+                            ),
                         };
                         return;
                     }
@@ -1650,6 +1662,7 @@ mod tests {
         rules: RefCell<Vec<RuleView>>,
         import_error: Option<String>,
         edit_error: Option<String>,
+        load_error: Option<String>,
         settings_error: Option<String>,
     }
     impl UiService for MockService {
@@ -1669,7 +1682,9 @@ mod tests {
             Ok(json!({}))
         }
         fn load_rules(&self) -> Result<Vec<RuleView>, String> {
-            Ok(self.rules.borrow().clone())
+            self.load_error
+                .clone()
+                .map_or_else(|| Ok(self.rules.borrow().clone()), Err)
         }
         fn load_settings(&self) -> Result<Settings, String> {
             self.settings_error
@@ -2486,8 +2501,35 @@ mod tests {
         assert!(app.form.is_none());
         assert_eq!(app.rules[0].state, "stopped");
         assert!(app.message.contains("saved; forwarding stopped"));
+        assert!(rendered(&app, 42).contains("一覧で確認"));
         assert_eq!(service.calls.borrow().len(), 1);
         assert_eq!(service.calls.borrow()[0].0, Operation::ForwardEditActive);
+    }
+    #[test]
+    fn active_edit_refresh_failure_does_not_claim_a_verified_state() {
+        for edit_fails in [false, true] {
+            let mut rule = sample_rule();
+            rule.state = "active".into();
+            let service = MockService {
+                edit_error: edit_fails.then(|| "save outcome unknown".into()),
+                load_error: Some("disconnected".into()),
+                ..MockService::default()
+            };
+            let mut app = App {
+                rules: vec![rule],
+                ..App::default()
+            };
+            let mut catalog = test_catalog();
+            handle_key(&mut app, key(KeyCode::Char('e')), &service, &mut catalog);
+            handle_key(&mut app, key(KeyCode::Enter), &service, &mut catalog);
+            assert!(app.form.is_none());
+            assert!(app.message.contains(if edit_fails {
+                "状態不明"
+            } else {
+                "表示更新失敗"
+            }));
+            assert!(rendered(&app, 42).contains("再接続して確認"));
+        }
     }
     #[test]
     fn suggestion_shortcut_does_not_consume_a_in_the_name_field() {

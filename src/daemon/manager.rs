@@ -623,7 +623,9 @@ impl DaemonManager {
             self.finish_edit(id);
             return Err((
                 ErrorCode::Internal,
-                format!("stop failed; old configuration unchanged; forwarding stopped: {error}"),
+                format!(
+                    "stop failed; old configuration unchanged; forwarding state uncertain: {error}"
+                ),
             ));
         }
         self.events.publish("rule_stopped", json!({"rule_id": id}));
@@ -1060,7 +1062,7 @@ mod tests {
         assert!(
             error
                 .message
-                .contains("stop failed; old configuration unchanged")
+                .contains("stop failed; old configuration unchanged; forwarding state uncertain")
         );
         let listed = result(manager.handle(&request(Operation::ForwardList, json!({}))));
         assert_eq!(listed[0]["name"], "proxy");
