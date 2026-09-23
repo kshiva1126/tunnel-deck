@@ -568,8 +568,15 @@ An existing stopped rule is updated by sending its stable ID through the
 existing `forward_add` operation. The daemon treats that ID as an atomic
 replacement after validating the whole candidate rule set; an active rule
 rejects editing. This preserves the version 1 operation and payload shape while
-keeping the daemon the sole writer. Duplication uses a fresh UUID, and deletion
-retains a confirmation step.
+keeping the daemon the sole writer. Duplication uses a fresh UUID. For TUI
+deletion, one confirmation stops a running rule by UUID before removing it by
+the same UUID; a stopped rule is removed directly after confirmation. This
+avoids a separate manual stop while retaining the daemon's active-removal
+rejection and existing IPC operations. A stop failure leaves the rule intact;
+after a remove error, the TUI reloads the list and offers a retry only if the
+rule remains. An error after an applied but durability-uncertain removal can
+leave no rule to retry, so the TUI reports that uncertainty instead. Canceling
+the confirmation sends no mutation.
 
 Terminal ownership is scoped by an RAII guard. Normal/error returns restore raw
 mode, alternate screen, and cursor; the panic hook restores them before the
