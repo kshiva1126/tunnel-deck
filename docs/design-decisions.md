@@ -117,13 +117,18 @@ and notarization remain release-owner work.
 ### M5 initial distribution through Cargo install
 
 The required initial distribution path is a source build with Cargo, not a
-downloaded prebuilt executable. Linux and macOS users build the selected Git
-branch with locked dependencies using the documented
-`cargo install --git ... --locked` command, or install a reviewed clone with
-`cargo install --path . --locked`. A fixed source revision requires an explicit
-`--rev <commit>`. This keeps the Rust 1.85
-and system OpenSSH prerequisites explicit. The package is not published on
-crates.io, so the shorter registry command is intentionally not documented.
+downloaded prebuilt executable. Linux and macOS users install the published
+crate with `cargo install tunnel-deck --locked`, build the selected Git branch
+with locked dependencies using `cargo install --git ... --locked`, or install a
+reviewed clone with `cargo install --path . --locked`. A fixed Git source
+revision requires an explicit `--rev <commit>`. This keeps the Rust 1.85 and
+system OpenSSH prerequisites explicit. GH-67 adds crates.io as a distribution
+source while retaining the Git route for branch or revision-specific installs.
+
+Publishing version 0.1.0 on crates.io does not require pushing a `v0.1.0` Git
+tag. The existing tag workflow would also create a prebuilt GitHub Release,
+which has separate signing and acceptance work under GH-51. Record the exact
+published commit on GH-67; create a release tag when that prebuilt path is ready.
 
 The ordinary Linux/macOS CI matrix installs the checkout into an isolated
 Cargo root, then runs the installed `tdeck` version and help entry points. It
