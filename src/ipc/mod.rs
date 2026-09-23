@@ -46,6 +46,7 @@ pub enum Operation {
     HostTest,
     ForwardList,
     ForwardAdd,
+    ForwardImport,
     ForwardRemove,
     ForwardStart,
     ForwardStop,

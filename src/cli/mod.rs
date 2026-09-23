@@ -1,6 +1,7 @@
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 
 use std::{
+    collections::HashSet,
     env,
     io::Write,
     path::{Path, PathBuf},
@@ -9,6 +10,7 @@ use std::{
 
 use crate::{
     application::hosts::{ConnectionOutcome, HostCatalog},
+    application::import::{ImportClassification, ImportForwarding},
     daemon::{
         lifecycle::{self, DaemonEndpoint},
         manager::DaemonManager,
@@ -133,12 +135,23 @@ enum ForwardCommand {
     List,
     /// Add a Local, Remote, or Dynamic forwarding rule
     Add(AddArgs),
+    /// Preview effective SSH forwards and optionally save selected candidates
+    Import(ImportArgs),
     /// Remove a stopped forwarding rule
     Remove(RuleArgs),
     /// Start a forwarding rule
     Start(RuleArgs),
     /// Stop a forwarding rule
     Stop(RuleArgs),
+}
+
+#[derive(Debug, Args)]
+struct ImportArgs {
+    /// Exact SSH Host alias whose effective forwards are inspected
+    host: String,
+    /// Candidate ID to save; repeat the option or use comma-separated IDs
+    #[arg(long, value_delimiter = ',')]
+    select: Vec<usize>,
 }
 
 #[derive(Debug, Args)]
@@ -234,6 +247,7 @@ impl Cli {
                     }
                     daemon_call(Operation::ForwardAdd, payload, json_output)
                 }
+                ForwardCommand::Import(args) => execute_import(args, json_output),
                 ForwardCommand::Remove(args) => {
                     daemon_rule_call(Operation::ForwardRemove, args.rule, json_output)
                 }
@@ -261,11 +275,13 @@ impl Cli {
             }
             Some(Command::Manpage) => {
                 let mut output = Vec::new();
-                clap_mangen::Man::new(Self::command())
+                let command = Self::command();
+                clap_mangen::Man::new(command.clone())
                     .render(&mut output)
                     .map_err(|error| {
                         AppError::Configuration(format!("could not generate manual page: {error}"))
                     })?;
+                append_subcommands(&command, "tdeck", &mut output);
                 emit_generated("manpage", output, json_output)
             }
             Some(Command::Daemon { command }) => match command {
@@ -276,6 +292,31 @@ impl Cli {
                 }
             },
         }
+    }
+}
+
+fn append_subcommands(command: &clap::Command, prefix: &str, output: &mut Vec<u8>) {
+    if command.get_subcommands().next().is_none() {
+        return;
+    }
+    output.extend_from_slice(b"\n.SH SUBCOMMANDS\n");
+    append_subcommand_entries(command, prefix, output);
+}
+
+fn append_subcommand_entries(command: &clap::Command, prefix: &str, output: &mut Vec<u8>) {
+    for subcommand in command
+        .get_subcommands()
+        .filter(|value| !value.is_hide_set())
+    {
+        let name = format!("{prefix} {}", subcommand.get_name());
+        output.extend_from_slice(b".TP\n\\fB");
+        output.extend_from_slice(name.as_bytes());
+        output.extend_from_slice(b"\\fR\n");
+        if let Some(about) = subcommand.get_about() {
+            output.extend_from_slice(about.to_string().as_bytes());
+            output.push(b'\n');
+        }
+        append_subcommand_entries(subcommand, &name, output);
     }
 }
 
@@ -323,6 +364,260 @@ fn update_settings(args: SettingsArgs, json_output: bool) -> Result<(), AppError
         settings["default_auto_start"] = serde_json::json!(value);
     }
     daemon_call(Operation::SettingsUpdate, settings, json_output)
+}
+
+fn execute_import(args: ImportArgs, json_output: bool) -> Result<(), AppError> {
+    let listed = daemon_value(Operation::ForwardList, serde_json::json!({}), json_output)?;
+    let existing = serde_json::from_value::<Vec<crate::config::Rule>>(listed)
+        .map_err(|error| AppError::Configuration(error.to_string()))?
+        .into_iter()
+        .map(crate::domain::rule::Rule::try_from)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| AppError::Configuration(error.to_string()))?;
+    let status = daemon_value(Operation::Status, serde_json::json!({}), json_output)?;
+    let running = status["forwards"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|value| value["state"].as_str() != Some("stopped"))
+        .filter_map(|value| value["rule_id"].as_str())
+        .filter_map(|value| uuid::Uuid::parse_str(value).ok())
+        .map(crate::domain::rule::RuleId::from_uuid)
+        .collect::<Vec<_>>();
+
+    let home = env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| AppError::Configuration("HOME is not set".to_owned()))?;
+    let ssh_home = home.join(".ssh");
+    let ssh = env::var_os("TDECK_SSH")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("ssh"));
+    let catalog = HostCatalog::new(ssh_home.join("config"), &ssh_home, ssh);
+    let preview = catalog.import_preview(&args.host, &existing, &running)?;
+    let mut output = import_preview_json(&preview);
+
+    if !args.select.is_empty() {
+        let selected = args.select.iter().copied().collect::<HashSet<_>>();
+        if selected.len() != args.select.len() || selected.contains(&0) {
+            return Err(AppError::Configuration(
+                "candidate IDs must be unique positive integers".to_owned(),
+            ));
+        }
+        if selected.iter().any(|id| *id > preview.candidates.len()) {
+            return Err(AppError::Configuration(
+                "selected candidate ID does not exist".to_owned(),
+            ));
+        }
+        let mut names = existing
+            .iter()
+            .map(|rule| rule.name().as_str().to_owned())
+            .collect::<HashSet<_>>();
+        let settings = daemon_value(Operation::SettingsGet, serde_json::json!({}), json_output)?;
+        let mut rules = Vec::new();
+        for (index, candidate) in preview.candidates.iter().enumerate() {
+            let candidate_id = index + 1;
+            if !selected.contains(&candidate_id) {
+                continue;
+            }
+            if !matches!(candidate.classification, ImportClassification::Supported) {
+                return Err(AppError::Configuration(format!(
+                    "candidate {candidate_id} cannot be saved because it is unavailable"
+                )));
+            }
+            let forwarding = candidate.forwarding.as_ref().ok_or_else(|| {
+                AppError::Configuration(format!("candidate {candidate_id} has no forwarding"))
+            })?;
+            let name = import_rule_name(forwarding, candidate_id, &mut names);
+            rules.push(import_rule_json(
+                &args.host,
+                forwarding,
+                name,
+                settings["default_auto_start"].as_bool().unwrap_or(false),
+                settings["default_reconnect"].as_bool().unwrap_or(false),
+            ));
+        }
+        let saved = daemon_value(
+            Operation::ForwardImport,
+            serde_json::json!({"rules": rules}),
+            json_output,
+        )?;
+        output["saved_rule_ids"] = saved["rule_ids"].clone();
+    }
+
+    if json_output {
+        println!("{output}");
+    } else {
+        print_import_preview(&output);
+    }
+    Ok(())
+}
+
+fn import_rule_name(
+    forwarding: &ImportForwarding,
+    candidate_id: usize,
+    names: &mut HashSet<String>,
+) -> String {
+    let (kind, port) = match forwarding {
+        ImportForwarding::Local { bind_port, .. } => ("local", bind_port),
+        ImportForwarding::Remote { bind_port, .. } => ("remote", bind_port),
+        ImportForwarding::Dynamic { bind_port, .. } => ("dynamic", bind_port),
+    };
+    let base = format!("import-{kind}-{port}");
+    let mut name = base.clone();
+    let mut suffix = candidate_id;
+    while names.contains(&name) {
+        name = format!("{base}-{suffix}");
+        suffix += 1;
+    }
+    names.insert(name.clone());
+    name
+}
+
+fn import_rule_json(
+    host: &str,
+    forwarding: &ImportForwarding,
+    name: String,
+    auto_start: bool,
+    reconnect: bool,
+) -> serde_json::Value {
+    let mut value = match forwarding {
+        ImportForwarding::Local {
+            bind_address,
+            bind_port,
+            destination_host,
+            destination_port,
+        } => {
+            serde_json::json!({"kind":"local","bind_address":bind_address,"bind_port":bind_port,"destination_host":destination_host,"destination_port":destination_port})
+        }
+        ImportForwarding::Remote {
+            bind_address,
+            bind_port,
+            destination_host,
+            destination_port,
+        } => {
+            serde_json::json!({"kind":"remote","bind_address":bind_address,"bind_port":bind_port,"destination_host":destination_host,"destination_port":destination_port})
+        }
+        ImportForwarding::Dynamic {
+            bind_address,
+            bind_port,
+        } => {
+            serde_json::json!({"kind":"dynamic","bind_address":bind_address,"bind_port":bind_port})
+        }
+    };
+    value["id"] = serde_json::json!(uuid::Uuid::new_v4());
+    value["name"] = serde_json::json!(name);
+    value["ssh_host_alias"] = serde_json::json!(host);
+    value["auto_start"] = serde_json::json!(auto_start);
+    value["reconnect"] = serde_json::json!(reconnect);
+    value
+}
+
+fn import_preview_json(preview: &crate::application::import::ImportPreview) -> serde_json::Value {
+    let candidates = preview
+        .candidates
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| {
+            let (status, reason) = match &candidate.classification {
+                ImportClassification::Supported => ("supported", serde_json::Value::Null),
+                ImportClassification::DuplicateDirective { first_index } => (
+                    "duplicate",
+                    serde_json::json!({"kind":"directive","candidate_id":first_index + 1}),
+                ),
+                ImportClassification::DuplicateRule { rule_id, running } => (
+                    "duplicate",
+                    serde_json::json!({"kind":"rule","rule_id":rule_id.as_uuid(),"running":running}),
+                ),
+                ImportClassification::Conflict { rule_id, running } => (
+                    "conflict",
+                    serde_json::json!({"rule_id":rule_id.map(|id| id.as_uuid()),"running":running}),
+                ),
+                ImportClassification::Unsupported { reason } => (
+                    "unsupported",
+                    serde_json::json!({"kind":unsupported_reason_name(*reason)}),
+                ),
+                ImportClassification::Invalid { reason } => (
+                    "invalid",
+                    serde_json::json!({"kind":invalid_reason_name(*reason)}),
+                ),
+            };
+            let mut value = match &candidate.forwarding {
+                Some(ImportForwarding::Local { bind_address, bind_port, destination_host, destination_port }) => serde_json::json!({"id":index + 1,"type":"local","bind":{"address":bind_address,"port":bind_port},"destination":{"host":destination_host,"port":destination_port}}),
+                Some(ImportForwarding::Remote { bind_address, bind_port, destination_host, destination_port }) => serde_json::json!({"id":index + 1,"type":"remote","bind":{"address":bind_address,"port":bind_port},"destination":{"host":destination_host,"port":destination_port}}),
+                Some(ImportForwarding::Dynamic { bind_address, bind_port }) => serde_json::json!({"id":index + 1,"type":"dynamic","bind":{"address":bind_address,"port":bind_port},"destination":serde_json::Value::Null}),
+                None => serde_json::json!({"id":index + 1,"type":format!("{:?}", candidate.kind).to_ascii_lowercase(),"bind":serde_json::Value::Null,"destination":serde_json::Value::Null}),
+            };
+            value["status"] = serde_json::json!(status);
+            value["reason"] = reason;
+            value
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "ssh_host_alias": preview.ssh_host_alias,
+        "candidates": candidates,
+        "saved_rule_ids": [],
+    })
+}
+
+fn unsupported_reason_name(reason: crate::application::import::UnsupportedReason) -> &'static str {
+    use crate::application::import::UnsupportedReason;
+    match reason {
+        UnsupportedReason::UnixSocket => "unix_socket",
+        UnsupportedReason::RemoteDynamic => "remote_dynamic",
+    }
+}
+
+fn invalid_reason_name(reason: crate::application::import::InvalidReason) -> &'static str {
+    use crate::application::import::InvalidReason;
+    match reason {
+        InvalidReason::Syntax => "syntax",
+        InvalidReason::BindAddress => "bind_address",
+        InvalidReason::DestinationHost => "destination_host",
+        InvalidReason::Port => "port",
+        InvalidReason::NonUtf8Output => "non_utf8_output",
+    }
+}
+
+fn print_import_preview(value: &serde_json::Value) {
+    println!("host: {}", value["ssh_host_alias"].as_str().unwrap_or("-"));
+    for candidate in value["candidates"].as_array().into_iter().flatten() {
+        let bind = candidate["bind"].as_object().map(|bind| {
+            format!(
+                "{}:{}",
+                bind["address"].as_str().unwrap_or("-"),
+                bind["port"].as_u64().unwrap_or(0)
+            )
+        });
+        let destination = candidate["destination"].as_object().map(|destination| {
+            format!(
+                " -> {}:{}",
+                destination["host"].as_str().unwrap_or("-"),
+                destination["port"].as_u64().unwrap_or(0)
+            )
+        });
+        let reason = if candidate["reason"].is_null() {
+            String::new()
+        } else {
+            format!(" {}", candidate["reason"])
+        };
+        println!(
+            "{}\t{}\t{}\t{}{}{}",
+            candidate["id"].as_u64().unwrap_or(0),
+            candidate["type"].as_str().unwrap_or("-"),
+            candidate["status"].as_str().unwrap_or("-"),
+            bind.as_deref().unwrap_or("-"),
+            destination.as_deref().unwrap_or(""),
+            reason,
+        );
+    }
+    if let Some(ids) = value["saved_rule_ids"]
+        .as_array()
+        .filter(|ids| !ids.is_empty())
+    {
+        println!("saved: {}", ids.len());
+    }
 }
 
 fn resolved_paths() -> Result<Paths, AppError> {

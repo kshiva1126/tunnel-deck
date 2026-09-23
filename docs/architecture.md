@@ -105,8 +105,13 @@ without terminals, sockets, or real SSH connections.
 The effective-forward import preview is an application-layer read operation.
 It reuses host discovery's bounded `ssh -G` execution, parses forwarding lines
 into preview-only typed values, and compares immutable desired/running
-snapshots. It does not call configuration storage, daemon IPC, or process
-management; selection and persistence remain future UI/application work.
+snapshots. Preview parsing does not call configuration storage or process
+management. The CLI obtains snapshots through daemon IPC and requires explicit
+candidate IDs before sending one `forward_import` mutation. The daemon validates
+the complete resulting rule set and performs one atomic configuration save;
+validation or persistence failure leaves both desired and runtime state
+unchanged. Import never starts a selected rule. The future TUI workflow can
+reuse these same application and daemon boundaries.
 
 ## IPC
 

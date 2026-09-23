@@ -207,6 +207,46 @@ impl DaemonManager {
                     .publish("configuration_changed", json!({"rule_id": id}));
                 Ok(json!({"rule_id": id}))
             }
+            Operation::ForwardImport => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct ImportPayload {
+                    rules: Vec<WireRule>,
+                }
+                let payload: ImportPayload =
+                    serde_json::from_value(request.payload.clone()).map_err(invalid)?;
+                if payload.rules.is_empty() {
+                    return Err((
+                        ErrorCode::InvalidRequest,
+                        "at least one imported rule is required".to_owned(),
+                    ));
+                }
+                let imported = payload
+                    .rules
+                    .into_iter()
+                    .map(Rule::try_from)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| (ErrorCode::InvalidRequest, error.to_string()))?;
+                let ids = imported
+                    .iter()
+                    .map(|rule| rule.id().as_uuid())
+                    .collect::<Vec<_>>();
+                let mut next = state.rules.clone();
+                next.extend(imported);
+                validate_rule_set(&next).map_err(|errors| {
+                    let error = crate::config::StoreError::InvalidRules(errors);
+                    (ErrorCode::Conflict, error.to_string())
+                })?;
+                let settings = state.settings.clone();
+                state
+                    .store
+                    .save_config(&next, &settings)
+                    .map_err(internal)?;
+                state.rules = next;
+                self.events
+                    .publish("configuration_changed", json!({"rule_ids": ids}));
+                Ok(json!({"rule_ids": ids}))
+            }
             Operation::ForwardRemove => {
                 let id = rule_id(&request.payload, &state)?;
                 if state.running.contains_key(&id) {
@@ -919,6 +959,66 @@ mod tests {
         let saved = std::fs::read_to_string(root.path().join("config.toml")).unwrap();
         let parsed: ConfigV2 = toml::from_str(&saved).unwrap();
         assert_eq!(serde_json::to_value(parsed.settings).unwrap(), desired);
+    }
+
+    #[test]
+    fn forward_import_validates_and_persists_the_whole_batch_once() {
+        let root = private_tempdir();
+        let manager = DaemonManager::open(root.path()).unwrap();
+        let local = Uuid::new_v4();
+        let dynamic = Uuid::new_v4();
+        let payload = json!({"rules":[
+            {"kind":"local","id":local,"name":"import-local","ssh_host_alias":"host","bind_address":"127.0.0.1","bind_port":3100,"destination_host":"127.0.0.1","destination_port":3000,"auto_start":false,"reconnect":false},
+            {"kind":"dynamic","id":dynamic,"name":"import-dynamic","ssh_host_alias":"host","bind_address":"127.0.0.1","bind_port":1080,"auto_start":false,"reconnect":false}
+        ]});
+        let imported = result(manager.handle(&request(Operation::ForwardImport, payload)));
+        assert_eq!(imported["rule_ids"], json!([local, dynamic]));
+        assert_eq!(
+            result(manager.handle(&request(Operation::ForwardList, json!({}))))
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            result(manager.handle(&request(Operation::Status, json!({}))))["active"],
+            0
+        );
+    }
+
+    #[test]
+    fn forward_import_never_keeps_a_partial_batch_on_validation_or_save_failure() {
+        let root = private_tempdir();
+        let manager = DaemonManager::open(root.path()).unwrap();
+        let conflicting = json!({"rules":[
+            {"kind":"dynamic","id":Uuid::new_v4(),"name":"first","ssh_host_alias":"host","bind_address":"127.0.0.1","bind_port":1080,"auto_start":false,"reconnect":false},
+            {"kind":"local","id":Uuid::new_v4(),"name":"second","ssh_host_alias":"host","bind_address":"127.0.0.1","bind_port":1080,"destination_host":"localhost","destination_port":80,"auto_start":false,"reconnect":false}
+        ]});
+        assert_eq!(
+            failure(manager.handle(&request(Operation::ForwardImport, conflicting))).code,
+            ErrorCode::Conflict
+        );
+        assert!(
+            result(manager.handle(&request(Operation::ForwardList, json!({}))))
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+
+        std::fs::create_dir(root.path().join("config.toml")).unwrap();
+        let save_failure = json!({"rules":[
+            {"kind":"dynamic","id":Uuid::new_v4(),"name":"not-saved","ssh_host_alias":"host","bind_address":"127.0.0.1","bind_port":1081,"auto_start":false,"reconnect":false}
+        ]});
+        assert_eq!(
+            failure(manager.handle(&request(Operation::ForwardImport, save_failure))).code,
+            ErrorCode::Internal
+        );
+        assert!(
+            result(manager.handle(&request(Operation::ForwardList, json!({}))))
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
