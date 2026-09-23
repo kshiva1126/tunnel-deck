@@ -142,6 +142,19 @@ pub struct ManagedAttempt {
 }
 
 impl ManagedAttempt {
+    #[cfg(test)]
+    pub(crate) fn failed_stop_fixture(attempt_dir: PathBuf) -> Self {
+        let guardian = Command::new("sh").args(["-c", "exit 7"]).spawn().unwrap();
+        Self {
+            lease: None,
+            guardian: Some(guardian),
+            // No master exists in this fixture; use an unreachable group ID.
+            master_pid: i32::MAX,
+            attempt_dir,
+            attempt_id: Uuid::new_v4(),
+        }
+    }
+
     pub fn stop(mut self) -> Result<(), ProcessError> {
         self.cleanup()
     }

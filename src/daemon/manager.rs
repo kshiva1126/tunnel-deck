@@ -30,6 +30,7 @@ struct State {
     running: HashMap<Uuid, Attempt>,
     diagnostics: HashMap<Uuid, RuntimeInfo>,
     manually_stopped: HashSet<Uuid>,
+    editing: HashSet<Uuid>,
 }
 enum Attempt {
     Starting(Uuid),
@@ -79,6 +80,7 @@ impl DaemonManager {
                 running: HashMap::new(),
                 diagnostics: HashMap::new(),
                 manually_stopped: HashSet::new(),
+                editing: HashSet::new(),
             }),
             events: EventHub::default(),
             process: None,
@@ -178,6 +180,9 @@ impl DaemonManager {
                 let rule = Rule::try_from(wire)
                     .map_err(|error| (ErrorCode::InvalidRequest, error.to_string()))?;
                 let id = rule.id().as_uuid();
+                if state.editing.contains(&id) {
+                    return Err((ErrorCode::Conflict, "rule is being edited".to_owned()));
+                }
                 let mut next = state.rules.clone();
                 if let Some(existing) = next
                     .iter_mut()
@@ -264,6 +269,9 @@ impl DaemonManager {
             }
             Operation::ForwardRemove => {
                 let id = rule_id(&request.payload, &state)?;
+                if state.editing.contains(&id) {
+                    return Err((ErrorCode::Conflict, "rule is being edited".to_owned()));
+                }
                 if state.running.contains_key(&id) {
                     return Err((
                         ErrorCode::Conflict,
@@ -295,6 +303,9 @@ impl DaemonManager {
             }
             Operation::ForwardStop => {
                 unreachable!("stop is dispatched without holding the state lock")
+            }
+            Operation::ForwardEditActive => {
+                unreachable!("active editing is dispatched without holding the state lock")
             }
             Operation::SettingsGet => serde_json::to_value(&state.settings).map_err(internal),
             Operation::SettingsUpdate => {
@@ -355,6 +366,15 @@ impl DaemonManager {
     }
 
     fn start(&self, request: &Request, automatic: bool) -> Result<Value, (ErrorCode, String)> {
+        self.start_inner(request, automatic, false)
+    }
+
+    fn start_inner(
+        &self,
+        request: &Request,
+        automatic: bool,
+        edit_owned: bool,
+    ) -> Result<Value, (ErrorCode, String)> {
         let attempt_id = Uuid::new_v4();
         let rule = {
             let mut state = self.state.lock().map_err(|_| {
@@ -364,10 +384,13 @@ impl DaemonManager {
                 )
             })?;
             let id = rule_id(&request.payload, &state)?;
+            if state.editing.contains(&id) && !edit_owned {
+                return Err((ErrorCode::Conflict, "rule is being edited".to_owned()));
+            }
             if automatic && state.manually_stopped.contains(&id) {
                 return Ok(json!({"rule_id": id, "start_requested": false, "changed": false}));
             }
-            if !automatic {
+            if !automatic && !edit_owned {
                 state.manually_stopped.remove(&id);
             }
             let rule = state
@@ -411,7 +434,8 @@ impl DaemonManager {
                     if matches!(state.running.get(&id), Some(Attempt::Starting(current)) if *current == attempt_id)
                     {
                         failure_recorded = true;
-                        let reconnect_enabled = rule.reconnect() && diagnostic.retryable;
+                        let reconnect_enabled =
+                            rule.reconnect() && diagnostic.retryable && !edit_owned;
                         let info = state.diagnostics.entry(id).or_default();
                         info.active_since = None;
                         info.last_error = Some(LastError {
@@ -432,6 +456,8 @@ impl DaemonManager {
                                     due: Instant::now() + delay,
                                 },
                             );
+                        } else if edit_owned {
+                            state.running.remove(&id);
                         } else {
                             state.running.insert(id, Attempt::Failed);
                         }
@@ -489,6 +515,9 @@ impl DaemonManager {
                 None => Attempt::Starting(attempt_id),
             },
         );
+        if edit_owned {
+            state.manually_stopped.remove(&id);
+        }
         let info = state.diagnostics.entry(id).or_default();
         info.active_since = Some(Instant::now());
         info.last_error = None;
@@ -507,6 +536,9 @@ impl DaemonManager {
                 )
             })?;
             let id = rule_id(&request.payload, &state)?;
+            if state.editing.contains(&id) {
+                return Err((ErrorCode::Conflict, "rule is being edited".to_owned()));
+            }
             if !state.rules.iter().any(|rule| rule.id().as_uuid() == id) {
                 return Err((ErrorCode::NotFound, "rule was not found".to_owned()));
             }
@@ -526,6 +558,155 @@ impl DaemonManager {
             self.events.publish("rule_stopped", json!({"rule_id": id}));
         }
         Ok(json!({"rule_id": id, "start_requested": false, "changed": changed}))
+    }
+
+    fn edit_active(&self, request: &Request) -> Result<Value, (ErrorCode, String)> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct EditPayload {
+            expected: WireRule,
+            replacement: WireRule,
+        }
+        let payload: EditPayload =
+            serde_json::from_value(request.payload.clone()).map_err(invalid)?;
+        let expected = Rule::try_from(payload.expected).map_err(invalid)?;
+        let replacement = Rule::try_from(payload.replacement).map_err(invalid)?;
+        let id = expected.id().as_uuid();
+        if replacement.id().as_uuid() != id {
+            return Err((
+                ErrorCode::InvalidRequest,
+                "replacement rule ID differs".to_owned(),
+            ));
+        }
+        let attempt = {
+            let mut state = self.state.lock().map_err(|_| {
+                (
+                    ErrorCode::Internal,
+                    "daemon state is unavailable".to_owned(),
+                )
+            })?;
+            let current = state
+                .rules
+                .iter()
+                .find(|rule| rule.id().as_uuid() == id)
+                .ok_or((ErrorCode::NotFound, "rule was not found".to_owned()))?;
+            if current != &expected || state.editing.contains(&id) {
+                return Err((
+                    ErrorCode::Conflict,
+                    "rule changed since editing began".to_owned(),
+                ));
+            }
+            if !matches!(state.running.get(&id), Some(Attempt::Active(_))) {
+                return Err((ErrorCode::Conflict, "rule is no longer active".to_owned()));
+            }
+            let mut next = state.rules.clone();
+            let Some(slot) = next.iter_mut().find(|rule| rule.id().as_uuid() == id) else {
+                return Err((ErrorCode::NotFound, "rule was not found".to_owned()));
+            };
+            *slot = replacement.clone();
+            validate_rule_set(&next).map_err(|errors| {
+                (
+                    ErrorCode::Conflict,
+                    StoreError::InvalidRules(errors).to_string(),
+                )
+            })?;
+            state.editing.insert(id);
+            state.manually_stopped.insert(id);
+            state.diagnostics.remove(&id);
+            state.running.remove(&id)
+        };
+        let Some(Attempt::Active(attempt)) = attempt else {
+            self.finish_edit(id);
+            return Err((ErrorCode::Internal, "active attempt disappeared".to_owned()));
+        };
+        if let Err(error) = attempt.stop() {
+            if let Ok(mut state) = self.state.lock() {
+                state.running.insert(id, Attempt::Failed);
+                state.diagnostics.entry(id).or_default().last_error = Some(LastError {
+                    kind: DiagnosticKind::Unknown,
+                    message: "stop failed; forwarding state uncertain".to_owned(),
+                });
+            }
+            self.log_event(
+                LogLevel::Error,
+                &format!("event=rule_failed rule_id={id} diagnostic_kind=unknown diagnostic=stop failed; forwarding state uncertain"),
+            );
+            self.events.publish("rule_failed", json!({"rule_id": id}));
+            self.finish_edit(id);
+            return Err((
+                ErrorCode::Internal,
+                format!(
+                    "stop failed; old configuration unchanged; forwarding state uncertain: {error}"
+                ),
+            ));
+        }
+        self.events.publish("rule_stopped", json!({"rule_id": id}));
+        let save = {
+            let mut state = self.state.lock().map_err(|_| {
+                (
+                    ErrorCode::Internal,
+                    "daemon state is unavailable".to_owned(),
+                )
+            })?;
+            let mut next = state.rules.clone();
+            let Some(slot) = next.iter_mut().find(|rule| rule.id().as_uuid() == id) else {
+                drop(state);
+                self.finish_edit(id);
+                return Err((ErrorCode::Internal, "reserved rule disappeared".to_owned()));
+            };
+            *slot = replacement;
+            let validation = validate_rule_set(&next).map_err(StoreError::InvalidRules);
+            let settings = state.settings.clone();
+            let outcome = validation.and_then(|()| state.store.save_config(&next, &settings));
+            if outcome.is_ok() || matches!(outcome, Err(StoreError::DurabilityUncertain(_))) {
+                state.rules = next;
+                self.events
+                    .publish("configuration_changed", json!({"rule_id": id}));
+            }
+            outcome
+        };
+        let start_request = Request::new(Operation::ForwardStart, json!({"rule_id": id}));
+        let restart = self.start_inner(&start_request, false, true);
+        self.finish_edit(id);
+        match (save, restart) {
+            (Ok(()), Ok(_)) => Ok(json!({"rule_id": id, "saved": true, "state": "active"})),
+            (Ok(()), Err((_, error))) => Err((
+                ErrorCode::Unavailable,
+                format!(
+                    "new configuration saved; forwarding stopped after restart failure: {error}"
+                ),
+            )),
+            (Err(StoreError::DurabilityUncertain(error)), Ok(_)) => Err((
+                ErrorCode::Internal,
+                format!(
+                    "new configuration applied and forwarding restarted; persistence durability uncertain: {error}"
+                ),
+            )),
+            (Err(StoreError::DurabilityUncertain(error)), Err((_, restart))) => Err((
+                ErrorCode::Internal,
+                format!(
+                    "new configuration applied but durability uncertain; forwarding stopped after restart failure: {restart}; save: {error}"
+                ),
+            )),
+            (Err(error), Ok(_)) => Err((
+                save_error_code(&error),
+                format!(
+                    "save failed; old configuration restored and forwarding restarted: {error}"
+                ),
+            )),
+            (Err(error), Err((_, restart))) => Err((
+                save_error_code(&error),
+                format!(
+                    "save failed; old configuration unchanged; forwarding stopped after restart failure: {restart}; save: {error}"
+                ),
+            )),
+        }
+    }
+
+    fn finish_edit(&self, id: Uuid) {
+        if let Ok(mut state) = self.state.lock() {
+            state.editing.remove(&id);
+        }
     }
 }
 
@@ -649,6 +830,7 @@ impl RequestHandler for DaemonManager {
         let result = match request.operation {
             Operation::ForwardStart => self.start(request, false),
             Operation::ForwardStop => self.stop(request),
+            Operation::ForwardEditActive => self.edit_active(request),
             _ => self.dispatch(request),
         };
         match result {
@@ -663,6 +845,14 @@ impl RequestHandler for DaemonManager {
 
 fn internal(error: impl std::fmt::Display) -> (ErrorCode, String) {
     (ErrorCode::Internal, error.to_string())
+}
+
+fn save_error_code(error: &StoreError) -> ErrorCode {
+    if matches!(error, StoreError::InvalidRules(_)) {
+        ErrorCode::Conflict
+    } else {
+        ErrorCode::Internal
+    }
 }
 
 /// A directory-sync failure happens after the atomic rename, so callers must
@@ -859,6 +1049,51 @@ mod tests {
         let error = failure(manager.handle(&request(Operation::ForwardAdd, rule("not-saved"))));
         assert_eq!(error.code, ErrorCode::Conflict);
         assert!(error.message.contains("cannot be edited"));
+    }
+
+    #[test]
+    fn active_edit_stop_failure_preserves_old_rule_and_storage() {
+        let root = private_tempdir();
+        let manager = DaemonManager::open(root.path()).unwrap();
+        let id = Uuid::new_v4();
+        let old = json!({"kind":"dynamic","id":id,"name":"proxy","ssh_host_alias":"host","bind_address":"127.0.0.1","bind_port":1080,"auto_start":false,"reconnect":false});
+        let mut new = old.clone();
+        new["name"] = json!("renamed");
+        result(manager.handle(&request(Operation::ForwardAdd, old.clone())));
+        manager.state.lock().unwrap().running.insert(
+            id,
+            Attempt::Active(process::ManagedAttempt::failed_stop_fixture(
+                root.path().join("attempt"),
+            )),
+        );
+        let error = failure(manager.handle(&request(
+            Operation::ForwardEditActive,
+            json!({"expected":old,"replacement":new}),
+        )));
+        assert_eq!(error.code, ErrorCode::Internal);
+        assert!(
+            error
+                .message
+                .contains("stop failed; old configuration unchanged; forwarding state uncertain")
+        );
+        let listed = result(manager.handle(&request(Operation::ForwardList, json!({}))));
+        assert_eq!(listed[0]["name"], "proxy");
+        assert_eq!(
+            manager.state.lock().unwrap().store.load().unwrap().unwrap()[0]
+                .name()
+                .as_str(),
+            "proxy"
+        );
+        assert_eq!(
+            result(manager.handle(&request(Operation::Status, json!({}))))["active"],
+            0
+        );
+        let status = result(manager.handle(&request(Operation::Status, json!({}))));
+        assert_eq!(status["forwards"][0]["state"], "failed");
+        assert_eq!(
+            status["forwards"][0]["last_error"],
+            "stop failed; forwarding state uncertain"
+        );
     }
 
     #[test]

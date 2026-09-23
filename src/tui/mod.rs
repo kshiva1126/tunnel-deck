@@ -244,6 +244,7 @@ impl ImportPanel {
 struct Form {
     id: Uuid,
     editing: bool,
+    active_original: Option<WireRule>,
     host: String,
     name: String,
     remote_port: String,
@@ -260,6 +261,7 @@ impl Form {
         Self {
             id: Uuid::new_v4(),
             editing: false,
+            active_original: None,
             host,
             name: String::new(),
             remote_port: String::new(),
@@ -276,13 +278,23 @@ impl Form {
         Self {
             id: rule.id,
             editing: true,
+            active_original: (rule.state == "active").then(|| rule.to_wire()),
             host: rule.host.clone(),
             name: rule.name.clone(),
-            remote_port: rule
-                .destination_port
-                .map(|v| v.to_string())
-                .unwrap_or_default(),
-            local_port: rule.bind_port.to_string(),
+            remote_port: if rule.kind == "remote" {
+                rule.bind_port.to_string()
+            } else {
+                rule.destination_port
+                    .map(|v| v.to_string())
+                    .unwrap_or_default()
+            },
+            local_port: if rule.kind == "remote" {
+                rule.destination_port
+                    .map(|v| v.to_string())
+                    .unwrap_or_default()
+            } else {
+                rule.bind_port.to_string()
+            },
             field: 0,
             suggestion: None,
             error: None,
@@ -295,6 +307,7 @@ impl Form {
         let mut f = Self::edit(rule);
         f.id = Uuid::new_v4();
         f.editing = false;
+        f.active_original = None;
         f.name.push_str(" copy");
         f
     }
@@ -327,11 +340,34 @@ impl Form {
             self.suggestion = None;
             return;
         };
-        self.suggestion = if port != 0 && !port_available(LOOPBACK, port) {
-            next_available_port(LOOPBACK, port)
+        self.suggestion = if port != 0
+            && self.kind != "remote"
+            && !self.own_active_port(port)
+            && !port_available(self.probe_address(), port)
+        {
+            next_available_port(self.probe_address(), port)
         } else {
             None
         };
+    }
+    fn own_active_port(&self, port: u16) -> bool {
+        self.active_original
+            .as_ref()
+            .is_some_and(|rule| match rule {
+                WireRule::Local { bind_port, .. } | WireRule::Dynamic { bind_port, .. } => {
+                    *bind_port == port
+                }
+                WireRule::Remote { .. } => false,
+            })
+            && self.kind != "remote"
+    }
+    fn probe_address(&self) -> &str {
+        let address = match self.active_original.as_ref() {
+            Some(WireRule::Local { bind_address, .. }) if self.kind == "local" => bind_address,
+            Some(WireRule::Dynamic { bind_address, .. }) if self.kind == "dynamic" => bind_address,
+            _ => return LOOPBACK,
+        };
+        if address == "*" { "0.0.0.0" } else { address }
     }
     fn accept_suggestion(&mut self) {
         if let Some(port) = self.suggestion.take() {
@@ -369,8 +405,11 @@ impl Form {
             self.error = Some(e.to_string());
             return None;
         }
-        if self.kind != "remote" && !port_available(LOOPBACK, local) {
-            self.suggestion = next_available_port(LOOPBACK, local);
+        if self.kind != "remote"
+            && !self.own_active_port(local)
+            && !port_available(self.probe_address(), local)
+        {
+            self.suggestion = next_available_port(self.probe_address(), local);
             self.error = Some(format!(
                 "ローカルポート {local} は使用中です。候補を選択してください"
             ));
@@ -381,6 +420,15 @@ impl Form {
         if self.kind != "dynamic" {
             value["destination_host"] = json!(LOOPBACK);
             value["destination_port"] = json!(if self.kind == "remote" { local } else { remote });
+        }
+        if let Some(original) = &self.active_original {
+            let original = serde_json::to_value(original).ok()?;
+            if original["kind"] == value["kind"] {
+                value["bind_address"] = original["bind_address"].clone();
+                if self.kind != "dynamic" {
+                    value["destination_host"] = original["destination_host"].clone();
+                }
+            }
         }
         Some(value)
     }
@@ -495,7 +543,14 @@ impl Service {
         lifecycle::ensure_running(&self.socket, &self.executable, DEFAULT_TIMEOUT)
             .map_err(|e| e.to_string())?;
         let request = Request::new(operation, payload);
-        let timeout = if operation == Operation::ForwardStop {
+        let timeout = if operation == Operation::ForwardEditActive {
+            crate::daemon::process::STOP_RESPONSE_TIMEOUT
+                + crate::daemon::process::STARTUP_TIMEOUT
+                + crate::daemon::process::CONTROL_TIMEOUT
+                + crate::daemon::process::STOP_GRACE
+                + Duration::from_secs(2)
+                + DEFAULT_TIMEOUT
+        } else if operation == Operation::ForwardStop {
             crate::daemon::process::STOP_RESPONSE_TIMEOUT
         } else {
             DEFAULT_TIMEOUT
@@ -517,27 +572,9 @@ impl UiService for Service {
         let wire: Vec<WireRule> =
             serde_json::from_value(self.call(Operation::ForwardList, json!({}))?)
                 .map_err(|e| e.to_string())?;
-        let mut rules: Vec<_> = wire.into_iter().map(RuleView::from_wire).collect();
-        if let Ok(status) = self.call(Operation::Status, json!({})) {
-            if let Some(states) = status["forwards"].as_array() {
-                for state in states {
-                    if let (Some(id), Some(value)) = (
-                        state["rule_id"]
-                            .as_str()
-                            .and_then(|v| Uuid::parse_str(v).ok()),
-                        state["state"].as_str(),
-                    ) {
-                        if let Some(rule) = rules.iter_mut().find(|r| r.id == id) {
-                            rule.state = value.into();
-                            rule.uptime_seconds = state["uptime_seconds"].as_u64().unwrap_or(0);
-                            rule.reconnect_count = state["reconnect_count"].as_u64().unwrap_or(0);
-                            rule.last_error = state["last_error"].as_str().map(str::to_owned);
-                        }
-                    }
-                }
-            }
-        }
-        Ok(rules)
+        let status = self.call(Operation::Status, json!({}))?;
+        let rules = wire.into_iter().map(RuleView::from_wire).collect();
+        apply_runtime_status(rules, &status)
     }
     fn load_settings(&self) -> Result<Settings, String> {
         serde_json::from_value(self.call(Operation::SettingsGet, json!({}))?)
@@ -548,6 +585,27 @@ impl UiService for Service {
         serde_json::from_value(self.call(Operation::SettingsUpdate, payload)?)
             .map_err(|error| error.to_string())
     }
+}
+
+fn apply_runtime_status(mut rules: Vec<RuleView>, status: &Value) -> Result<Vec<RuleView>, String> {
+    let states = status["forwards"]
+        .as_array()
+        .ok_or("daemon status did not include forwarding states")?;
+    for rule in &mut rules {
+        let id = rule.id.to_string();
+        let state = states
+            .iter()
+            .find(|state| state["rule_id"].as_str() == Some(id.as_str()))
+            .ok_or("daemon status did not include a listed rule")?;
+        rule.state = state["state"]
+            .as_str()
+            .ok_or("daemon status did not include a rule state")?
+            .into();
+        rule.uptime_seconds = state["uptime_seconds"].as_u64().unwrap_or(0);
+        rule.reconnect_count = state["reconnect_count"].as_u64().unwrap_or(0);
+        rule.last_error = state["last_error"].as_str().map(str::to_owned);
+    }
+    Ok(rules)
 }
 
 pub fn run() -> Result<(), AppError> {
@@ -962,6 +1020,33 @@ fn handle_key(app: &mut App, key: KeyEvent, service: &dyn UiService, catalog: &m
             KeyCode::Char(ch) => form.input(ch),
             KeyCode::Enter => {
                 if let Some(payload) = form.payload() {
+                    if let Some(expected) = form.active_original.clone() {
+                        let outcome = service.call(
+                            Operation::ForwardEditActive,
+                            json!({"expected": expected, "replacement": payload}),
+                        );
+                        app.form = None;
+                        let refreshed = service.load_rules();
+                        if let Ok(rules) = &refreshed {
+                            app.replace_rules(rules.clone());
+                        }
+                        if let Ok(settings) = service.load_settings() {
+                            app.settings = settings;
+                        }
+                        app.message = match (outcome, refreshed) {
+                            (Ok(_), Ok(_)) => "転送を保存して再起動しました".into(),
+                            (Err(error), Ok(_)) => {
+                                format!("編集結果を一覧で確認: {error}")
+                            }
+                            (Ok(_), Err(refresh_error)) => {
+                                format!("表示更新失敗。再接続して確認: {refresh_error}")
+                            }
+                            (Err(error), Err(refresh_error)) => format!(
+                                "状態不明。再接続して確認: {error}; 再取得失敗: {refresh_error}"
+                            ),
+                        };
+                        return;
+                    }
                     match service.call(Operation::ForwardAdd, payload) {
                         Ok(v) => {
                             let id = v["rule_id"]
@@ -1083,10 +1168,10 @@ fn handle_key(app: &mut App, key: KeyEvent, service: &dyn UiService, catalog: &m
         }
         KeyCode::Char('e') => {
             if let Some(rule) = app.selected().cloned() {
-                if rule.state == "stopped" {
+                if matches!(rule.state.as_str(), "stopped" | "active") {
                     app.form = Some(Form::edit(&rule))
                 } else {
-                    app.message = "編集前に転送を停止してください".into()
+                    app.message = "転送が稼働中または停止済みになってから編集してください".into()
                 }
             }
         }
@@ -1163,7 +1248,7 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
             ),
         tabs_area,
     );
-    match app.page{Page::Dashboard=>render_dashboard(frame,content,app),Page::Hosts=>render_hosts(frame,content,app),Page::Detail=>render_detail(frame,content,app),Page::Settings=>render_settings(frame,content,app),Page::Help=>frame.render_widget(Paragraph::new("Esc: nで開いたホスト一覧から戻る\nj/k・↑/↓/ホイール 選択  行クリック 選択のみ  Enter 詳細/決定  Space 起動/停止\nn 新規  e 編集  c 複製  d 削除（稼働中は停止後・確認あり／ダッシュボードと詳細）\nr ホスト更新  i SSH転送import  h HTTP  s HTTPS\nTab/上部クリック 画面切替  q 終了（転送は継続）").wrap(Wrap{trim:false}).block(Block::default().title("ヘルプ").borders(Borders::ALL)),content)}
+    match app.page{Page::Dashboard=>render_dashboard(frame,content,app),Page::Hosts=>render_hosts(frame,content,app),Page::Detail=>render_detail(frame,content,app),Page::Settings=>render_settings(frame,content,app),Page::Help=>frame.render_widget(Paragraph::new("Esc: nで開いたホスト一覧から戻る\nj/k・↑/↓/ホイール 選択  行クリック 選択のみ  Enter 詳細/決定  Space 起動/停止\nn 新規  e 編集（稼働中は保存時に再起動）  c 複製  d 削除（稼働中は停止後・確認あり／ダッシュボードと詳細）\nr ホスト更新  i SSH転送import  h HTTP  s HTTPS\nTab/上部クリック 画面切替  q 終了（転送は継続）").wrap(Wrap{trim:false}).block(Block::default().title("ヘルプ").borders(Borders::ALL)),content)}
     let hint = page_hint(app, footer.width);
     frame.render_widget(Paragraph::new(format!("{hint}\n{}", app.message)), footer);
     if let Some(form) = &app.form {
@@ -1454,7 +1539,11 @@ fn render_form(frame: &mut ratatui::Frame<'_>, area: Rect, form: &Form) {
             "auto_start: {} (F3) / reconnect: {} (F4)",
             form.auto_start, form.reconnect
         )),
-        Line::from("Tab: 項目移動  Enter: 保存して起動  Esc: キャンセル"),
+        Line::from(if form.active_original.is_some() {
+            "Tab: 項目移動  Enter: 停止・保存・再起動  Esc: キャンセル（稼働継続）"
+        } else {
+            "Tab: 項目移動  Enter: 保存して起動  Esc: キャンセル"
+        }),
     ];
     if let Some(port) = form.suggestion {
         lines.push(Line::from(Span::styled(
@@ -1575,6 +1664,8 @@ mod tests {
         calls: RefCell<Vec<(Operation, Value)>>,
         rules: RefCell<Vec<RuleView>>,
         import_error: Option<String>,
+        edit_error: Option<String>,
+        load_error: Option<String>,
         settings_error: Option<String>,
     }
     impl UiService for MockService {
@@ -1586,10 +1677,17 @@ mod tests {
                 }
                 return Ok(json!({"rule_ids": []}));
             }
+            if operation == Operation::ForwardEditActive {
+                if let Some(error) = &self.edit_error {
+                    return Err(error.clone());
+                }
+            }
             Ok(json!({}))
         }
         fn load_rules(&self) -> Result<Vec<RuleView>, String> {
-            Ok(self.rules.borrow().clone())
+            self.load_error
+                .clone()
+                .map_or_else(|| Ok(self.rules.borrow().clone()), Err)
         }
         fn load_settings(&self) -> Result<Settings, String> {
             self.settings_error
@@ -2298,6 +2396,161 @@ mod tests {
 
         assert_eq!(payload["bind_port"], 9000);
         assert_eq!(payload["destination_port"], 3000);
+    }
+    #[test]
+    fn active_edit_opens_without_mutation_and_cancel_keeps_forwarding() {
+        let mut rule = sample_rule();
+        rule.state = "active".into();
+        let service = MockService::default();
+        let mut app = App {
+            rules: vec![rule.clone()],
+            ..App::default()
+        };
+        let mut catalog = test_catalog();
+        handle_key(&mut app, key(KeyCode::Char('e')), &service, &mut catalog);
+        let form = app.form.as_ref().unwrap();
+        assert_eq!(form.name, rule.name);
+        assert_eq!(form.local_port, rule.bind_port.to_string());
+        assert_eq!(form.remote_port, rule.destination_port.unwrap().to_string());
+        assert!(service.calls.borrow().is_empty());
+        handle_key(&mut app, key(KeyCode::Char('x')), &service, &mut catalog);
+        handle_key(&mut app, key(KeyCode::Esc), &service, &mut catalog);
+        assert!(app.form.is_none());
+        assert!(service.calls.borrow().is_empty());
+        assert_eq!(app.rules[0].state, "active");
+    }
+    #[test]
+    fn active_edit_uses_one_conditional_request_for_unchanged_port() {
+        let listener = TcpListener::bind((LOOPBACK, 0)).unwrap();
+        let mut rule = sample_rule();
+        rule.state = "active".into();
+        rule.bind_port = listener.local_addr().unwrap().port();
+        let service = MockService {
+            rules: RefCell::new(vec![rule.clone()]),
+            ..MockService::default()
+        };
+        let mut app = App {
+            rules: vec![rule.clone()],
+            ..App::default()
+        };
+        let mut catalog = test_catalog();
+        handle_key(&mut app, key(KeyCode::Char('e')), &service, &mut catalog);
+        let form = app.form.as_mut().unwrap();
+        form.name = "renamed".into();
+        assert!(
+            form.payload().is_some(),
+            "own active listener must not be a conflict"
+        );
+        handle_key(&mut app, key(KeyCode::Enter), &service, &mut catalog);
+        let calls = service.calls.borrow();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, Operation::ForwardEditActive);
+        assert_eq!(calls[0].1["expected"]["name"], rule.name);
+        assert_eq!(calls[0].1["replacement"]["name"], "renamed");
+        assert_eq!(calls[0].1["replacement"]["bind_port"], rule.bind_port);
+    }
+    #[test]
+    fn active_remote_edit_prefills_listener_and_destination_ports() {
+        let mut rule = sample_rule();
+        rule.state = "active".into();
+        rule.kind = "remote";
+        rule.bind_port = 9000;
+        rule.destination_port = Some(3000);
+        let mut form = Form::edit(&rule);
+        assert_eq!(form.remote_port, "9000");
+        assert_eq!(form.local_port, "3000");
+        let payload = form.payload().unwrap();
+        assert_eq!(payload["bind_port"], 9000);
+        assert_eq!(payload["destination_port"], 3000);
+    }
+    #[test]
+    fn active_edit_rejects_another_local_listener_before_save() {
+        let listener = TcpListener::bind((LOOPBACK, 0)).unwrap();
+        let mut rule = sample_rule();
+        rule.state = "active".into();
+        let service = MockService::default();
+        let mut app = App {
+            rules: vec![rule],
+            ..App::default()
+        };
+        let mut catalog = test_catalog();
+        handle_key(&mut app, key(KeyCode::Char('e')), &service, &mut catalog);
+        let form = app.form.as_mut().unwrap();
+        form.local_port = listener.local_addr().unwrap().port().to_string();
+        assert!(form.payload().is_none());
+        assert!(form.error.as_deref().unwrap().contains("使用中"));
+        assert!(service.calls.borrow().is_empty());
+    }
+    #[test]
+    fn active_edit_failure_refreshes_rule_state_and_reports_result() {
+        let mut rule = sample_rule();
+        rule.state = "active".into();
+        let mut stopped = rule.clone();
+        stopped.state = "stopped".into();
+        let service = MockService {
+            rules: RefCell::new(vec![stopped]),
+            edit_error: Some(
+                "new configuration saved; forwarding stopped after restart failure".into(),
+            ),
+            ..MockService::default()
+        };
+        let mut app = App {
+            rules: vec![rule],
+            ..App::default()
+        };
+        let mut catalog = test_catalog();
+        handle_key(&mut app, key(KeyCode::Char('e')), &service, &mut catalog);
+        handle_key(&mut app, key(KeyCode::Enter), &service, &mut catalog);
+        assert!(app.form.is_none());
+        assert_eq!(app.rules[0].state, "stopped");
+        assert!(app.message.contains("saved; forwarding stopped"));
+        assert!(rendered(&app, 42).contains("一覧で確認"));
+        assert_eq!(service.calls.borrow().len(), 1);
+        assert_eq!(service.calls.borrow()[0].0, Operation::ForwardEditActive);
+    }
+    #[test]
+    fn active_edit_refresh_failure_does_not_claim_a_verified_state() {
+        for edit_fails in [false, true] {
+            let mut rule = sample_rule();
+            rule.state = "active".into();
+            let service = MockService {
+                edit_error: edit_fails.then(|| "save outcome unknown".into()),
+                load_error: Some("disconnected".into()),
+                ..MockService::default()
+            };
+            let mut app = App {
+                rules: vec![rule],
+                ..App::default()
+            };
+            let mut catalog = test_catalog();
+            handle_key(&mut app, key(KeyCode::Char('e')), &service, &mut catalog);
+            handle_key(&mut app, key(KeyCode::Enter), &service, &mut catalog);
+            assert!(app.form.is_none());
+            assert!(app.message.contains(if edit_fails {
+                "状態不明"
+            } else {
+                "表示更新失敗"
+            }));
+            assert!(rendered(&app, 42).contains("再接続して確認"));
+        }
+    }
+    #[test]
+    fn rule_reload_requires_runtime_status_for_every_listed_rule() {
+        let rule = sample_rule();
+        let status = json!({"forwards":[{"rule_id":rule.id,"state":"active","uptime_seconds":7,"reconnect_count":2}]});
+        let loaded = apply_runtime_status(vec![rule.clone()], &status).unwrap();
+        assert_eq!(loaded[0].state, "active");
+        assert_eq!(loaded[0].uptime_seconds, 7);
+        assert_eq!(loaded[0].reconnect_count, 2);
+        assert!(apply_runtime_status(vec![rule.clone()], &json!({})).is_err());
+        assert!(apply_runtime_status(vec![rule.clone()], &json!({"forwards":[]})).is_err());
+        assert!(
+            apply_runtime_status(
+                vec![rule],
+                &json!({"forwards":[{"rule_id":status["forwards"][0]["rule_id"]}]})
+            )
+            .is_err()
+        );
     }
     #[test]
     fn suggestion_shortcut_does_not_consume_a_in_the_name_field() {
