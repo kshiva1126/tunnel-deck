@@ -389,6 +389,7 @@ impl Form {
 #[derive(Debug)]
 struct App {
     page: Page,
+    hosts_return: Option<Page>,
     hosts: Vec<String>,
     rules: Vec<RuleView>,
     selected_host: usize,
@@ -408,6 +409,7 @@ impl Default for App {
     fn default() -> Self {
         Self {
             page: Page::Dashboard,
+            hosts_return: None,
             hosts: vec![],
             rules: vec![],
             selected_host: 0,
@@ -427,6 +429,13 @@ impl Default for App {
     }
 }
 impl App {
+    fn show_page(&mut self, page: Page) {
+        if self.page == Page::Hosts && page != Page::Hosts {
+            self.hosts_return = None;
+        }
+        self.page = page;
+    }
+
     fn selected(&self) -> Option<&RuleView> {
         self.rules.get(self.selected_rule)
     }
@@ -647,13 +656,15 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, size: Rect) {
                         + if index + 1 == TAB_TITLES.len() { 2 } else { 3 };
                     let right = left.saturating_add(width).min(tabs.right() - 1);
                     if mouse.column >= left && mouse.column < right {
-                        app.page = [
-                            Page::Dashboard,
-                            Page::Hosts,
-                            Page::Detail,
-                            Page::Settings,
-                            Page::Help,
-                        ][index];
+                        app.show_page(
+                            [
+                                Page::Dashboard,
+                                Page::Hosts,
+                                Page::Detail,
+                                Page::Settings,
+                                Page::Help,
+                            ][index],
+                        );
                         return;
                     }
                     left = right;
@@ -943,15 +954,21 @@ fn handle_key(app: &mut App, key: KeyEvent, service: &dyn UiService, catalog: &m
     }
     match key.code {
         KeyCode::Char('q') => app.quit = true,
-        KeyCode::Char('?') => app.page = Page::Help,
+        KeyCode::Char('?') => app.show_page(Page::Help),
+        KeyCode::Esc if app.page == Page::Hosts => {
+            if let Some(previous) = app.hosts_return.take() {
+                app.show_page(previous);
+            }
+        }
         KeyCode::Tab => {
-            app.page = match app.page {
+            let next = match app.page {
                 Page::Dashboard => Page::Hosts,
                 Page::Hosts => Page::Detail,
                 Page::Detail => Page::Settings,
                 Page::Settings => Page::Help,
                 Page::Help => Page::Dashboard,
-            }
+            };
+            app.show_page(next);
         }
         KeyCode::Down | KeyCode::Char('j') if app.page == Page::Settings => {
             app.settings_field = (app.settings_field + 1) % 4
@@ -1004,8 +1021,11 @@ fn handle_key(app: &mut App, key: KeyEvent, service: &dyn UiService, catalog: &m
                 app.form = Some(form)
             }
         }
-        KeyCode::Enter if app.page == Page::Dashboard => app.page = Page::Detail,
+        KeyCode::Enter if app.page == Page::Dashboard => app.show_page(Page::Detail),
         KeyCode::Char('n') => {
+            if app.page != Page::Hosts {
+                app.hosts_return = Some(app.page);
+            }
             app.page = Page::Hosts;
             app.message = "ホストを選び Enter を押してください".into()
         }
@@ -1105,8 +1125,9 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
             ),
         tabs_area,
     );
-    match app.page{Page::Dashboard=>render_dashboard(frame,content,app),Page::Hosts=>render_hosts(frame,content,app),Page::Detail=>render_detail(frame,content,app),Page::Settings=>render_settings(frame,content,app),Page::Help=>frame.render_widget(Paragraph::new("j/k・↑/↓/ホイール 選択  行クリック 選択のみ  Enter 詳細/決定  Space 起動/停止\nn 新規  e 編集  c 複製  d 削除  r ホスト更新  i SSH転送import\nh HTTP  s HTTPS  Tab/上部クリック 画面切替  q 終了（転送は継続）").wrap(Wrap{trim:false}).block(Block::default().title("ヘルプ").borders(Borders::ALL)),content)}
-    frame.render_widget(Paragraph::new(app.message.as_str()), footer);
+    match app.page{Page::Dashboard=>render_dashboard(frame,content,app),Page::Hosts=>render_hosts(frame,content,app),Page::Detail=>render_detail(frame,content,app),Page::Settings=>render_settings(frame,content,app),Page::Help=>frame.render_widget(Paragraph::new("Esc: nで開いたホスト一覧から戻る\nj/k・↑/↓/ホイール 選択  行クリック 選択のみ  Enter 詳細/決定  Space 起動/停止\nn 新規  e 編集  c 複製  d 削除  r ホスト更新  i SSH転送import\nh HTTP  s HTTPS  Tab/上部クリック 画面切替  q 終了（転送は継続）").wrap(Wrap{trim:false}).block(Block::default().title("ヘルプ").borders(Borders::ALL)),content)}
+    let hint = page_hint(app, footer.width);
+    frame.render_widget(Paragraph::new(format!("{hint}\n{}", app.message)), footer);
     if let Some(form) = &app.form {
         render_form(frame, area, form)
     }
@@ -1115,6 +1136,28 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
     }
     if let Some(import) = &app.import {
         render_import(frame, area, import)
+    }
+}
+fn page_hint(app: &App, width: u16) -> &'static str {
+    let (full, compact) = match app.page {
+        Page::Dashboard => (
+            "n: 新規  ↑/↓: 選択  Enter: 詳細  ?: ヘルプ",
+            "n: 新規  Enter: 詳細  ?: ヘルプ",
+        ),
+        Page::Hosts if app.hosts_return.is_some() => (
+            "↑/↓: 選択  Enter: 新規  Esc: 戻る  ?: ヘルプ",
+            "Enter: 新規  Esc: 戻る  ?: ヘルプ",
+        ),
+        Page::Hosts => (
+            "↑/↓: 選択  Enter: 新規  Tab: 切替  ?: ヘルプ",
+            "Enter: 新規  Tab: 切替  ?: ヘルプ",
+        ),
+        _ => return "",
+    };
+    if Line::from(full).width() <= usize::from(width) {
+        full
+    } else {
+        compact
     }
 }
 fn render_settings(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
@@ -1546,6 +1589,112 @@ mod tests {
             uptime_seconds: 0,
             reconnect_count: 0,
             last_error: None,
+        }
+    }
+
+    fn rendered(app: &App, width: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, 20)).unwrap();
+        terminal.draw(|frame| render(frame, app)).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+            .replace(' ', "")
+    }
+
+    #[test]
+    fn new_hosts_escape_returns_to_origin_after_closing_overlays_without_mutation() {
+        let service = MockService::default();
+        let mut catalog = HostCatalog::new(
+            PathBuf::from("/nonexistent/config"),
+            PathBuf::from("/nonexistent/ssh"),
+            "ssh",
+        );
+        let mut app = App {
+            hosts: vec!["dev".into()],
+            rules: vec![sample_rule()],
+            ..App::default()
+        };
+        handle_key(&mut app, key(KeyCode::Char('n')), &service, &mut catalog);
+        assert_eq!(app.page, Page::Hosts);
+        assert_eq!(app.hosts_return, Some(Page::Dashboard));
+        handle_key(&mut app, key(KeyCode::Enter), &service, &mut catalog);
+        assert!(app.form.is_some());
+        handle_key(&mut app, key(KeyCode::Esc), &service, &mut catalog);
+        assert!(app.form.is_none());
+        assert_eq!(app.page, Page::Hosts);
+        app.import = Some(ImportPanel::preview(import_preview()));
+        handle_key(&mut app, key(KeyCode::Esc), &service, &mut catalog);
+        assert!(app.import.is_none());
+        assert_eq!(app.page, Page::Hosts);
+        handle_key(&mut app, key(KeyCode::Esc), &service, &mut catalog);
+        assert_eq!(app.page, Page::Dashboard);
+        assert_eq!(app.hosts_return, None);
+        assert!(service.calls.borrow().is_empty());
+
+        app.show_page(Page::Detail);
+        handle_key(&mut app, key(KeyCode::Char('n')), &service, &mut catalog);
+        handle_key(&mut app, key(KeyCode::Char('n')), &service, &mut catalog);
+        handle_key(&mut app, key(KeyCode::Esc), &service, &mut catalog);
+        assert_eq!(app.page, Page::Detail);
+        assert!(service.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn leaving_hosts_by_tab_clears_the_escape_destination() {
+        let service = MockService::default();
+        let mut catalog = HostCatalog::new(
+            PathBuf::from("/nonexistent/config"),
+            PathBuf::from("/nonexistent/ssh"),
+            "ssh",
+        );
+        let mut app = App::default();
+        handle_key(&mut app, key(KeyCode::Char('n')), &service, &mut catalog);
+        handle_key(&mut app, key(KeyCode::Tab), &service, &mut catalog);
+        assert_eq!(app.hosts_return, None);
+        app.show_page(Page::Hosts);
+        handle_key(&mut app, key(KeyCode::Esc), &service, &mut catalog);
+        assert_eq!(app.page, Page::Hosts);
+        assert!(service.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn dashboard_hosts_and_help_show_discoverable_keys_at_normal_and_narrow_widths() {
+        let mut app = App::default();
+        for width in [80, 42] {
+            let screen = rendered(&app, width);
+            assert!(screen.contains("n:新規"), "{width}: {screen}");
+            assert!(screen.contains("Enter:詳細"), "{width}: {screen}");
+            assert!(screen.contains("?:ヘルプ"), "{width}: {screen}");
+        }
+        app.show_page(Page::Hosts);
+        let screen = rendered(&app, 42);
+        assert!(screen.contains("Tab:切替"), "{screen}");
+        assert!(!screen.contains("Esc:戻る"), "{screen}");
+        app.hosts_return = Some(Page::Dashboard);
+        for width in [80, 42] {
+            let screen = rendered(&app, width);
+            assert!(screen.contains("Enter:新規"), "{width}: {screen}");
+            assert!(screen.contains("Esc:戻る"), "{width}: {screen}");
+            assert!(screen.contains("?:ヘルプ"), "{width}: {screen}");
+        }
+        let service = MockService::default();
+        let mut catalog = HostCatalog::new(
+            PathBuf::from("/nonexistent/config"),
+            PathBuf::from("/nonexistent/ssh"),
+            "ssh",
+        );
+        handle_key(&mut app, key(KeyCode::Char('?')), &service, &mut catalog);
+        assert_eq!(app.page, Page::Help);
+        for width in [80, 42] {
+            let screen = rendered(&app, width);
+            assert!(
+                screen.contains("Esc:nで開いたホスト一覧から戻る"),
+                "{width}: {screen}"
+            );
         }
     }
 
