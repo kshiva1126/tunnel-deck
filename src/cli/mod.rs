@@ -10,7 +10,7 @@ use std::{
 
 use crate::{
     application::hosts::{ConnectionOutcome, HostCatalog},
-    application::import::{ImportClassification, ImportForwarding},
+    application::import::{ImportClassification, ImportForwarding, selected_rules},
     daemon::{
         lifecycle::{self, DaemonEndpoint},
         manager::DaemonManager,
@@ -410,34 +410,20 @@ fn execute_import(args: ImportArgs, json_output: bool) -> Result<(), AppError> {
                 "selected candidate ID does not exist".to_owned(),
             ));
         }
-        let mut names = existing
-            .iter()
-            .map(|rule| rule.name().as_str().to_owned())
-            .collect::<HashSet<_>>();
         let settings = daemon_value(Operation::SettingsGet, serde_json::json!({}), json_output)?;
-        let mut rules = Vec::new();
-        for (index, candidate) in preview.candidates.iter().enumerate() {
-            let candidate_id = index + 1;
-            if !selected.contains(&candidate_id) {
-                continue;
-            }
-            if !matches!(candidate.classification, ImportClassification::Supported) {
-                return Err(AppError::Configuration(format!(
-                    "candidate {candidate_id} cannot be saved because it is unavailable"
-                )));
-            }
-            let forwarding = candidate.forwarding.as_ref().ok_or_else(|| {
-                AppError::Configuration(format!("candidate {candidate_id} has no forwarding"))
-            })?;
-            let name = import_rule_name(forwarding, candidate_id, &mut names);
-            rules.push(import_rule_json(
-                &args.host,
-                forwarding,
-                name,
-                settings["default_auto_start"].as_bool().unwrap_or(false),
-                settings["default_reconnect"].as_bool().unwrap_or(false),
-            ));
-        }
+        let settings: crate::config::Settings = serde_json::from_value(settings)
+            .map_err(|error| AppError::Configuration(error.to_string()))?;
+        let rules = selected_rules(
+            &preview,
+            &selected,
+            &existing,
+            settings.default_auto_start,
+            settings.default_reconnect,
+        )
+        .map_err(AppError::Configuration)?
+        .iter()
+        .map(crate::config::Rule::from)
+        .collect::<Vec<_>>();
         let saved = daemon_value(
             Operation::ForwardImport,
             serde_json::json!({"rules": rules}),
@@ -452,66 +438,6 @@ fn execute_import(args: ImportArgs, json_output: bool) -> Result<(), AppError> {
         print_import_preview(&output);
     }
     Ok(())
-}
-
-fn import_rule_name(
-    forwarding: &ImportForwarding,
-    candidate_id: usize,
-    names: &mut HashSet<String>,
-) -> String {
-    let (kind, port) = match forwarding {
-        ImportForwarding::Local { bind_port, .. } => ("local", bind_port),
-        ImportForwarding::Remote { bind_port, .. } => ("remote", bind_port),
-        ImportForwarding::Dynamic { bind_port, .. } => ("dynamic", bind_port),
-    };
-    let base = format!("import-{kind}-{port}");
-    let mut name = base.clone();
-    let mut suffix = candidate_id;
-    while names.contains(&name) {
-        name = format!("{base}-{suffix}");
-        suffix += 1;
-    }
-    names.insert(name.clone());
-    name
-}
-
-fn import_rule_json(
-    host: &str,
-    forwarding: &ImportForwarding,
-    name: String,
-    auto_start: bool,
-    reconnect: bool,
-) -> serde_json::Value {
-    let mut value = match forwarding {
-        ImportForwarding::Local {
-            bind_address,
-            bind_port,
-            destination_host,
-            destination_port,
-        } => {
-            serde_json::json!({"kind":"local","bind_address":bind_address,"bind_port":bind_port,"destination_host":destination_host,"destination_port":destination_port})
-        }
-        ImportForwarding::Remote {
-            bind_address,
-            bind_port,
-            destination_host,
-            destination_port,
-        } => {
-            serde_json::json!({"kind":"remote","bind_address":bind_address,"bind_port":bind_port,"destination_host":destination_host,"destination_port":destination_port})
-        }
-        ImportForwarding::Dynamic {
-            bind_address,
-            bind_port,
-        } => {
-            serde_json::json!({"kind":"dynamic","bind_address":bind_address,"bind_port":bind_port})
-        }
-    };
-    value["id"] = serde_json::json!(uuid::Uuid::new_v4());
-    value["name"] = serde_json::json!(name);
-    value["ssh_host_alias"] = serde_json::json!(host);
-    value["auto_start"] = serde_json::json!(auto_start);
-    value["reconnect"] = serde_json::json!(reconnect);
-    value
 }
 
 fn import_preview_json(preview: &crate::application::import::ImportPreview) -> serde_json::Value {

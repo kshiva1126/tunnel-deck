@@ -85,6 +85,105 @@ pub struct ImportPreview {
     pub candidates: Vec<ImportCandidate>,
 }
 
+/// Builds exactly the explicitly selected, supported candidates as new rules.
+/// Candidate IDs are one-based and rule IDs are allocated only for this save.
+pub fn selected_rules(
+    preview: &ImportPreview,
+    selected: &HashSet<usize>,
+    existing_rules: &[Rule],
+    auto_start: bool,
+    reconnect: bool,
+) -> Result<Vec<Rule>, String> {
+    if selected.is_empty() || selected.contains(&0) {
+        return Err("at least one candidate must be selected".to_owned());
+    }
+    if selected.iter().any(|id| *id > preview.candidates.len()) {
+        return Err("selected candidate ID does not exist".to_owned());
+    }
+    let mut names = existing_rules
+        .iter()
+        .map(|rule| rule.name().as_str().to_owned())
+        .collect::<HashSet<_>>();
+    let mut rules = Vec::new();
+    for (index, candidate) in preview.candidates.iter().enumerate() {
+        let candidate_id = index + 1;
+        if !selected.contains(&candidate_id) {
+            continue;
+        }
+        if !matches!(candidate.classification, ImportClassification::Supported) {
+            return Err(format!(
+                "candidate {candidate_id} cannot be saved because it is unavailable"
+            ));
+        }
+        let forwarding = candidate
+            .forwarding
+            .as_ref()
+            .ok_or_else(|| format!("candidate {candidate_id} has no forwarding"))?;
+        let name = import_rule_name(forwarding, candidate_id, &mut names);
+        let id = RuleId::new();
+        let rule = match forwarding {
+            ImportForwarding::Local {
+                bind_address,
+                bind_port,
+                destination_host,
+                destination_port,
+            } => Rule::local(
+                id,
+                name,
+                preview.ssh_host_alias.clone(),
+                *bind_port,
+                destination_host.clone(),
+                *destination_port,
+            )
+            .and_then(|rule| rule.with_bind_address(bind_address.clone())),
+            ImportForwarding::Remote {
+                bind_address,
+                bind_port,
+                destination_host,
+                destination_port,
+            } => Rule::remote(
+                id,
+                name,
+                preview.ssh_host_alias.clone(),
+                *bind_port,
+                destination_host.clone(),
+                *destination_port,
+            )
+            .and_then(|rule| rule.with_bind_address(bind_address.clone())),
+            ImportForwarding::Dynamic {
+                bind_address,
+                bind_port,
+            } => Rule::dynamic(id, name, preview.ssh_host_alias.clone(), *bind_port)
+                .and_then(|rule| rule.with_bind_address(bind_address.clone())),
+        }
+        .map(|rule| rule.with_policy(auto_start, reconnect))
+        .map_err(|error| error.to_string())?;
+        rules.push(rule);
+    }
+    Ok(rules)
+}
+
+fn import_rule_name(
+    forwarding: &ImportForwarding,
+    candidate_id: usize,
+    names: &mut HashSet<String>,
+) -> String {
+    let (kind, port) = match forwarding {
+        ImportForwarding::Local { bind_port, .. } => ("local", bind_port),
+        ImportForwarding::Remote { bind_port, .. } => ("remote", bind_port),
+        ImportForwarding::Dynamic { bind_port, .. } => ("dynamic", bind_port),
+    };
+    let base = format!("import-{kind}-{port}");
+    let mut name = base.clone();
+    let mut suffix = candidate_id;
+    while names.contains(&name) {
+        name = format!("{base}-{suffix}");
+        suffix += 1;
+    }
+    names.insert(name.clone());
+    name
+}
+
 pub fn preview_effective_forwards(
     alias: &str,
     output: &[u8],
