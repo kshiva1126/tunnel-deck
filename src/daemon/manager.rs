@@ -1,7 +1,7 @@
 //! Daemon-owned desired configuration and idempotent runtime intent.
 
 use crate::{
-    config::{ConfigStore, ConfigV2, LogLevel, Rule as WireRule, Settings},
+    config::{ConfigStore, ConfigV2, LogLevel, Rule as WireRule, Settings, StoreError},
     daemon::{
         lifecycle::RequestHandler,
         process::{self, DiagnosticKind, ManagedAttempt},
@@ -198,13 +198,13 @@ impl DaemonManager {
                     (ErrorCode::Conflict, error.to_string())
                 })?;
                 let settings = state.settings.clone();
-                state
-                    .store
-                    .save_config(&next, &settings)
-                    .map_err(internal)?;
+                let durability_error = save_outcome(state.store.save_config(&next, &settings))?;
                 state.rules = next;
                 self.events
                     .publish("configuration_changed", json!({"rule_id": id}));
+                if let Some(error) = durability_error {
+                    return Err(error);
+                }
                 Ok(json!({"rule_id": id}))
             }
             Operation::ForwardImport => {
@@ -253,13 +253,13 @@ impl DaemonManager {
                     (ErrorCode::Conflict, error.to_string())
                 })?;
                 let settings = state.settings.clone();
-                state
-                    .store
-                    .save_config(&next, &settings)
-                    .map_err(internal)?;
+                let durability_error = save_outcome(state.store.save_config(&next, &settings))?;
                 state.rules = next;
                 self.events
                     .publish("configuration_changed", json!({"rule_ids": ids}));
+                if let Some(error) = durability_error {
+                    return Err(error);
+                }
                 Ok(json!({"rule_ids": ids}))
             }
             Operation::ForwardRemove => {
@@ -281,13 +281,13 @@ impl DaemonManager {
                     return Err((ErrorCode::NotFound, "rule was not found".to_owned()));
                 }
                 let settings = state.settings.clone();
-                state
-                    .store
-                    .save_config(&next, &settings)
-                    .map_err(internal)?;
+                let durability_error = save_outcome(state.store.save_config(&next, &settings))?;
                 state.rules = next;
                 self.events
                     .publish("configuration_changed", json!({"rule_id": id}));
+                if let Some(error) = durability_error {
+                    return Err(error);
+                }
                 Ok(json!({"rule_id": id, "removed": true}))
             }
             Operation::ForwardStart => {
@@ -301,15 +301,15 @@ impl DaemonManager {
                 let settings: Settings =
                     serde_json::from_value(request.payload.clone()).map_err(invalid)?;
                 let rules = state.rules.clone();
-                state
-                    .store
-                    .save_config(&rules, &settings)
-                    .map_err(internal)?;
+                let durability_error = save_outcome(state.store.save_config(&rules, &settings))?;
                 state.settings = settings;
                 self.events.publish(
                     "settings_changed",
                     serde_json::to_value(&state.settings).map_err(internal)?,
                 );
+                if let Some(error) = durability_error {
+                    return Err(error);
+                }
                 serde_json::to_value(&state.settings).map_err(internal)
             }
             Operation::Status => {
@@ -664,6 +664,20 @@ impl RequestHandler for DaemonManager {
 fn internal(error: impl std::fmt::Display) -> (ErrorCode, String) {
     (ErrorCode::Internal, error.to_string())
 }
+
+/// A directory-sync failure happens after the atomic rename, so callers must
+/// reconcile their in-memory state and publish the mutation before returning
+/// the durability error to the client.
+fn save_outcome(
+    result: Result<(), StoreError>,
+) -> Result<Option<(ErrorCode, String)>, (ErrorCode, String)> {
+    match result {
+        Ok(()) => Ok(None),
+        Err(error @ StoreError::DurabilityUncertain(_)) => Ok(Some(internal(error))),
+        Err(error) => Err(internal(error)),
+    }
+}
+
 fn invalid(error: impl std::fmt::Display) -> (ErrorCode, String) {
     (ErrorCode::InvalidRequest, error.to_string())
 }

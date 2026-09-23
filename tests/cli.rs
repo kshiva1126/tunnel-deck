@@ -145,7 +145,22 @@ fn host_list_supports_json_output() {
 #[cfg(unix)]
 #[test]
 fn forward_import_previews_then_atomically_saves_only_explicit_supported_ids() {
-    use std::{fs, os::unix::fs::PermissionsExt, path::Path};
+    use std::{
+        fs,
+        os::unix::fs::PermissionsExt,
+        path::Path,
+        process::{Child, Stdio},
+        thread,
+        time::{Duration, Instant},
+    };
+
+    struct Daemon(Child);
+    impl Drop for Daemon {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
 
     fn isolated(root: &Path) -> Command {
         let mut command = tdeck();
@@ -193,6 +208,27 @@ fn forward_import_previews_then_atomically_saves_only_explicit_supported_ids() {
     )
     .unwrap();
     fs::set_permissions(&ssh, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let child = isolated(root.path())
+        .args(["daemon", "run"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let _daemon = Daemon(child);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let output = isolated(root.path())
+            .args(["--json", "status"])
+            .output()
+            .unwrap();
+        if output.status.success() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "daemon did not become ready");
+        thread::sleep(Duration::from_millis(20));
+    }
 
     let preview = run_json(root.path(), &["forward", "import", "sample"]);
     assert_eq!(preview["candidates"][0]["type"], "local");

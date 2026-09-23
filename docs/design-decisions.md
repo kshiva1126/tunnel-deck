@@ -411,9 +411,13 @@ daemon rejects the unknown operation and must be restarted or upgraded. The
 daemon converts every wire rule through the existing domain constructors,
 validates the complete resulting rule set, and calls the existing atomic config
 save once. It replaces in-memory desired state and publishes one configuration
-event only after persistence succeeds. Repeating `forward_add` was rejected
-because a later failure could leave an earlier candidate saved. Import does not
-call start, alter running attempts, or edit SSH configuration.
+event only after the file is atomically replaced. A failure before replacement
+leaves memory and disk unchanged. A directory-sync failure after replacement is
+reported as uncertain durability, but the daemon reconciles memory and emits the
+event because the complete batch is already visible on disk. Repeating
+`forward_add` was rejected because a later failure could leave an earlier
+candidate saved. Import does not call start, alter running attempts, or edit SSH
+configuration.
 
 ### M2 daemon IPC foundation implementation
 
