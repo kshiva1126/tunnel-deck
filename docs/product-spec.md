@@ -171,6 +171,7 @@ j/k or arrows   Move selection
 Enter           Open details / confirm
 Space           Start or stop selected rule
 n               New rule
+Esc             Return from the host list opened with n; close an open form or import panel first
 e               Edit
 d               Delete with confirmation
 /               Search or command palette

@@ -462,6 +462,18 @@ selection-only avoids accidental daemon mutations or external browser launch.
 Hit testing uses the same bounded page layout and visible row offset as
 rendering, so resize and small-screen events cannot select hidden rows.
 
+### TUI keyboard discovery and host return
+
+The dashboard and host list show their available primary keys in a dedicated
+footer line, with shorter hints at narrow terminal widths. Status and error
+messages keep the second footer line. Opening hosts with `n` remembers the
+current page in TUI state; `Esc` returns there only while that host visit is
+active. Leaving hosts through another page action clears the remembered page.
+An open form, delete confirmation, or import panel handles `Esc` first, so
+canceling it does not navigate away. Return navigation only changes local UI
+state and sends no daemon mutation. The host list reached through tabs has no
+remembered page and shows tab navigation instead of an unavailable return key.
+
 ### M6 TUI import selection
 
 The host list and the selected rule's host can open the same effective-forward
