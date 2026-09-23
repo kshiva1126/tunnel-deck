@@ -1,5 +1,12 @@
 # Release license, security, and resource audit
 
+This document audits the prebuilt archive path. The required initial
+distribution path is now a local source build through locked Cargo install, as
+recorded in the [design decisions](design-decisions.md#m5-initial-distribution-through-cargo-install).
+Downloaded-binary signing, notarization, and Gatekeeper work remains necessary
+before promoting prebuilt archives, but is not a direct requirement for a
+binary the user compiles locally from source.
+
 This is the pre-publication audit record for GH-50. It audits base commit
 `738e21bee70f599c2eed2d09815c4bd5948bf10e` plus the focused notice-generation,
 packaging, test, and documentation changes in GH-50. The eventual review commit

@@ -256,6 +256,15 @@ class ReleasePackagingTest(unittest.TestCase):
 
 
 class ReleaseWorkflowTest(unittest.TestCase):
+    def test_ci_smoke_tests_cargo_package_and_isolated_install_on_both_platforms(self):
+        workflow = Path(".github/workflows/ci.yml").read_text()
+        self.assertIn("os: [ubuntu-latest, macos-latest]", workflow)
+        self.assertIn('package_files="$(cargo package --list)"', workflow)
+        self.assertIn("README.md LICENSE Cargo.toml src/lib.rs src/main.rs", workflow)
+        self.assertIn('cargo install --path . --locked --root "$install_root"', workflow)
+        self.assertIn('"$install_root/bin/tdeck" --version', workflow)
+        self.assertIn('"$install_root/bin/tdeck" --help', workflow)
+
     def test_workflow_is_pr_testable_and_actions_are_commit_pinned(self):
         workflow = Path(".github/workflows/release.yml").read_text()
         self.assertIn("pull_request:", workflow)

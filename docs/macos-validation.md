@@ -4,6 +4,12 @@ macOS support is **under validation** until every release architecture has a
 native runtime result and the human checks below are complete. Cross-compiling
 or passing Linux tests does not change that status.
 
+The required initial distribution route is a local locked Cargo build. The
+Linux/macOS CI matrix performs `cargo install --path . --locked` into an
+isolated root and runs that installed `tdeck` with `--version` and `--help`.
+Gatekeeper, signing, and notarization apply to the separate downloaded-prebuilt
+path; they do not directly apply to this locally compiled executable.
+
 The initial minimum is macOS 13. Release candidates target Apple Silicon
 (`aarch64`) and Intel (`x86_64`). Do not lower or raise the minimum based only
 on a CI runner; verify the shipped artifact on the minimum OS before release.

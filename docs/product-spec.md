@@ -192,7 +192,8 @@ Ctrl+C          Exit safely and restore terminal
 
 ## MVP acceptance criteria
 
-1. A fresh Linux or macOS user can install the appropriate binary and launch `tdeck`.
+1. A fresh Linux or macOS user can install the locked source with Cargo and
+   launch `tdeck`.
 2. The TUI discovers a host from the user's SSH config.
 3. The user can create and persist one rule without editing a file.
 4. Local, remote, and dynamic rules can be started and stopped.

@@ -59,7 +59,22 @@ failure.
 The exact command tree should be validated during the first implementation
 milestone rather than treated as frozen.
 
-## Release artifacts
+## Install and get started
+
+The initial distribution path is a locked source build with Cargo on Linux and
+macOS. Install Rust 1.85 and OpenSSH, then run:
+
+```sh
+cargo install --git https://github.com/kshiva1126/tunnel-deck --locked
+tdeck --version
+```
+
+The repository is not currently published on crates.io, so
+`cargo install tunnel-deck` is not a valid installation command. See the
+[installation guide](docs/installation.md) for installing from a clone,
+updating, uninstalling, prerequisites, and SSH preparation.
+
+## Prebuilt release artifacts
 
 The `Release artifacts` GitHub Actions workflow builds archives for
 `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
@@ -78,22 +93,11 @@ have been validated. Every archive also includes TunnelDeck's `LICENSE` and the
 locked dependency notices in `THIRD_PARTY_LICENSES.txt`; the pre-publication
 evidence and remaining risks are recorded in the
 [release audit](docs/release-audit.md). Signing, notarization, Gatekeeper, real
-SSH/TUI behavior, and minimum-version hardware acceptance are separate release
-checks.
-
-## Install and get started
-
-Download the GitHub Release asset matching your Linux/macOS CPU, verify its
-published SHA-256 checksum, install the extracted `tdeck` executable on
-`PATH`, and follow the SSH preparation and first Local-forward walkthrough in
-the [installation guide](docs/installation.md). Archives use the name
-`tunnel-deck-<version>-<target>.tar.gz`; verify the selected archive against
-the published `SHA256SUMS` before extraction.
-
-The same guide covers safe updates, the current unsigned/unnotarized macOS
-Gatekeeper limitation, port conflicts, configuration and log locations, shell
-completion, the generated man page, and uninstalling. TunnelDeck never
-requires disabling Gatekeeper globally.
+SSH/TUI behavior, and minimum-version hardware acceptance are separate checks
+for a future prebuilt distribution path. They do not apply directly to a
+`cargo install` build produced locally from source. Prebuilt archives are not
+the required initial installation route, and TunnelDeck never requires
+disabling Gatekeeper globally.
 
 ## Documents
 
