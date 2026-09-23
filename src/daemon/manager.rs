@@ -227,6 +227,21 @@ impl DaemonManager {
                     .map(Rule::try_from)
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(|error| (ErrorCode::InvalidRequest, error.to_string()))?;
+                let mut ids_seen = state
+                    .rules
+                    .iter()
+                    .map(|rule| rule.id().as_uuid())
+                    .collect::<HashSet<_>>();
+                if let Some(id) = imported
+                    .iter()
+                    .map(|rule| rule.id().as_uuid())
+                    .find(|id| !ids_seen.insert(*id))
+                {
+                    return Err((
+                        ErrorCode::Conflict,
+                        format!("imported rule ID already exists: {id}"),
+                    ));
+                }
                 let ids = imported
                     .iter()
                     .map(|rule| rule.id().as_uuid())
@@ -1012,6 +1027,28 @@ mod tests {
         assert_eq!(
             failure(manager.handle(&request(Operation::ForwardImport, save_failure))).code,
             ErrorCode::Internal
+        );
+        assert!(
+            result(manager.handle(&request(Operation::ForwardList, json!({}))))
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn forward_import_rejects_duplicate_ids_without_mutation() {
+        let root = private_tempdir();
+        let manager = DaemonManager::open(root.path()).unwrap();
+        let id = Uuid::new_v4();
+        let payload = json!({"rules":[
+            {"kind":"remote","id":id,"name":"first","ssh_host_alias":"host","bind_address":"localhost","bind_port":4100,"destination_host":"localhost","destination_port":41,"auto_start":false,"reconnect":false},
+            {"kind":"remote","id":id,"name":"second","ssh_host_alias":"host","bind_address":"localhost","bind_port":4200,"destination_host":"localhost","destination_port":42,"auto_start":false,"reconnect":false}
+        ]});
+
+        assert_eq!(
+            failure(manager.handle(&request(Operation::ForwardImport, payload))).code,
+            ErrorCode::Conflict
         );
         assert!(
             result(manager.handle(&request(Operation::ForwardList, json!({}))))
