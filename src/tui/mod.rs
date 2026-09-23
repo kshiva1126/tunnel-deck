@@ -1845,7 +1845,7 @@ mod tests {
         assert!(app.rules.is_empty());
         assert!(app.message.contains("一覧から消えました"));
         assert!(app.message.contains("再起動後に確認"));
-        assert!(!app.message.contains("d で再試行"));
+        assert!(!app.message.contains("再試行"));
         assert!(rendered(&app, 42).contains("再起動後に確認"));
     }
 
