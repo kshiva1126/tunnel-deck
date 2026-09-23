@@ -125,7 +125,7 @@ elif name == "git":
             assert os.environ.get("SYMPHONY_GITHUB_TOKEN")
     elif command[:1] not in (["status"], ["rev-parse"]): sys.exit(4)
 elif name == "codex":
-    assert args == ["app-server", "-c", 'model="gpt-5.6-sol"']
+    assert args == ["app-server", "-c", 'model="gpt-6-sol"']
     assert all(k not in os.environ for k in ("SYMPHONY_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN", "SSH_AUTH_SOCK"))
     (root / "codex-ran").touch()
 elif name == "setpriv":
@@ -372,7 +372,7 @@ class HookTests(unittest.TestCase):
                 self.assertEqual(result.stdout, "", "stdout belongs to App Server RPC")
                 self.assertNotIn("synthetic-secret", result.stderr)
                 self.assertTrue((self.root / "codex-ran").exists())
-                self.assertIn('codex app-server -c model="gpt-5.6-sol"\n', self.calls())
+                self.assertIn('codex app-server -c model="gpt-6-sol"\n', self.calls())
                 self.assertEqual("setpriv --reuid=" in self.calls(), docker)
                 (self.root / "codex-ran").unlink()
                 (self.root / "calls").unlink()
