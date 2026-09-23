@@ -311,9 +311,9 @@ Shell syntax and diff whitespace checks passed.
 The GH-25 evidence above records the previous model. For GH-64, deployment
 acceptance evidence must come from a new **Symphony-dispatched** session using
 the updated trusted control checkout after merge and worker restart. A run from
-an issue workspace itself still uses the pre-change control checkout. Native
-Docker isolation and macOS are covered by the remote Linux/macOS checks after
-publication.
+an issue workspace itself still uses the pre-change control checkout. Remote
+Linux/macOS CI runs the Symphony harness on both operating systems; it does
+not validate native Docker isolation.
 
 ## Dependency admission and replay protection (GH-24)
 
