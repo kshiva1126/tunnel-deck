@@ -1129,10 +1129,44 @@ fn candidate_text(candidate: &crate::application::import::ImportCandidate) -> St
 fn render_import(frame: &mut ratatui::Frame<'_>, area: Rect, import: &ImportPanel) {
     let popup = centered(area, 90, 18);
     frame.render_widget(Clear, popup);
-    let mut lines = vec![Line::from(format!("ホスト: {}", import.host))];
+    let block = Block::default()
+        .title("SSH転送 import preview")
+        .borders(Borders::ALL);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    let mut footer = Vec::new();
+    if let Some(error) = &import.error {
+        footer.push(Line::from(Span::styled(
+            format!("エラー: {error}"),
+            Style::default().fg(Color::Red),
+        )));
+    }
+    footer.push(Line::from(if import.confirming {
+        format!(
+            "選択した {} 件だけ保存します。Enter/y: 保存  Esc/n: 戻る",
+            import.selected.len()
+        )
+    } else {
+        "Space: 選択  Enter: 最終確認  Esc: キャンセル（変更なし）".to_owned()
+    }));
+    let footer_height = footer.len().min(inner.height.saturating_sub(2) as usize) as u16;
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(footer_height),
+        ])
+        .split(inner);
+    frame.render_widget(
+        Paragraph::new(format!("ホスト: {}", import.host)),
+        sections[0],
+    );
+
+    let mut candidates = Vec::new();
     if let Some(preview) = &import.preview {
         if preview.candidates.is_empty() {
-            lines.push(Line::from("転送候補はありません"));
+            candidates.push(Line::from("転送候補はありません"));
         }
         for (index, candidate) in preview.candidates.iter().enumerate() {
             let cursor = if index == import.cursor { ">" } else { " " };
@@ -1143,35 +1177,21 @@ fn render_import(frame: &mut ratatui::Frame<'_>, area: Rect, import: &ImportPane
             } else {
                 "[-]"
             };
-            lines.push(Line::from(format!(
+            candidates.push(Line::from(format!(
                 "{cursor}{mark} {}. {}",
                 index + 1,
                 candidate_text(candidate)
             )));
         }
     }
-    if let Some(error) = &import.error {
-        lines.push(Line::from(Span::styled(
-            format!("エラー: {error}"),
-            Style::default().fg(Color::Red),
-        )));
-    }
-    lines.push(Line::from(if import.confirming {
-        format!(
-            "選択した {} 件だけ保存します。Enter/y: 保存  Esc/n: 戻る",
-            import.selected.len()
-        )
-    } else {
-        "Space: 選択  Enter: 最終確認  Esc: キャンセル（変更なし）".to_owned()
-    }));
-    frame.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: false }).block(
-            Block::default()
-                .title("SSH転送 import preview")
-                .borders(Borders::ALL),
-        ),
-        popup,
-    );
+    let visible_candidates = sections[1].height as usize;
+    let scroll = import
+        .cursor
+        .saturating_add(1)
+        .saturating_sub(visible_candidates)
+        .min(u16::MAX as usize) as u16;
+    frame.render_widget(Paragraph::new(candidates).scroll((scroll, 0)), sections[1]);
+    frame.render_widget(Paragraph::new(footer), sections[2]);
 }
 fn render_detail(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     let text=app.selected().map(|r|format!("名前: {}\n種別: {}\nホスト: {}\n状態: {}\n待受: {}:{} / 宛先ポート: {}\n稼働時間: {}秒 / 再接続: {}回\n最終診断: {}\nURL: {}\n\nh: HTTPで開く  s: HTTPSで開く",r.name,r.kind,r.host,r.state,r.bind_address,r.bind_port,r.destination_port.map(|v|v.to_string()).unwrap_or_else(||"-".into()),r.uptime_seconds,r.reconnect_count,r.last_error.as_deref().unwrap_or("-"),r.url("http"))).unwrap_or_else(||"転送がありません".into());
@@ -1459,6 +1479,44 @@ mod tests {
             terminal.draw(|frame| render(frame, &app)).unwrap();
         }
     }
+
+    #[test]
+    fn import_scrolls_long_candidate_lists_while_keeping_controls_visible() {
+        let output = (1..=24)
+            .map(|port| format!("localforward 127.0.0.1:{} 127.0.0.1:80", 3000 + port))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let preview = crate::application::import::preview_effective_forwards(
+            "dev",
+            output.as_bytes(),
+            &[],
+            &[],
+        )
+        .unwrap();
+        let mut panel = ImportPanel::preview(preview);
+        panel.cursor = 23;
+        let app = App {
+            import: Some(panel),
+            ..App::default()
+        };
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+
+        assert!(
+            text.contains(">[ ] 24."),
+            "cursor candidate is hidden: {text}"
+        );
+        assert!(text.contains("Esc:"), "controls are hidden: {text}");
+    }
+
     #[test]
     fn remote_port_becomes_local_default_and_busy_port_needs_acceptance() {
         let listener = TcpListener::bind((LOOPBACK, 0)).unwrap();
