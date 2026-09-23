@@ -393,6 +393,8 @@ struct App {
     rules: Vec<RuleView>,
     selected_host: usize,
     selected_rule: usize,
+    host_offset: usize,
+    rule_offset: usize,
     selected_id: Option<Uuid>,
     form: Option<Form>,
     confirm_delete: Option<Uuid>,
@@ -410,6 +412,8 @@ impl Default for App {
             rules: vec![],
             selected_host: 0,
             selected_rule: 0,
+            host_offset: 0,
+            rule_offset: 0,
             selected_id: None,
             form: None,
             confirm_delete: None,
@@ -444,6 +448,11 @@ impl App {
             .and_then(|id| self.rules.iter().position(|r| r.id == id))
             .unwrap_or_else(|| self.selected_rule.min(self.rules.len().saturating_sub(1)));
         self.selected_id = self.selected().map(|r| r.id)
+    }
+    fn replace_hosts(&mut self, hosts: Vec<String>) {
+        self.hosts = hosts;
+        self.selected_host = self.selected_host.min(self.hosts.len().saturating_sub(1));
+        self.host_offset = self.host_offset.min(self.selected_host);
     }
 }
 
@@ -536,7 +545,7 @@ pub fn run() -> Result<(), AppError> {
     let mut catalog = HostCatalog::new(home.join(".ssh/config"), home.join(".ssh"), "ssh");
     let mut app = App::default();
     match catalog.refresh() {
-        Ok(v) => app.hosts = v.aliases,
+        Ok(v) => app.replace_hosts(v.aliases),
         Err(e) => app.message = e.to_string(),
     }
     match service.load_rules() {
@@ -612,8 +621,14 @@ fn screen_areas(size: Rect) -> Option<(Rect, Rect, Rect)> {
     Some((chunks[0], chunks[1], chunks[2]))
 }
 
-fn list_offset(selected: usize, visible: usize) -> usize {
-    selected.saturating_sub(visible.saturating_sub(1))
+fn list_offset(selected: usize, visible: usize, offset: usize) -> usize {
+    if selected < offset {
+        selected
+    } else if selected >= offset.saturating_add(visible) {
+        selected.saturating_sub(visible.saturating_sub(1))
+    } else {
+        offset
+    }
 }
 
 fn handle_mouse(app: &mut App, mouse: MouseEvent, size: Rect) {
@@ -654,19 +669,21 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, size: Rect) {
             match app.page {
                 Page::Dashboard if mouse.row > content.y + 1 => {
                     let visible = content.height.saturating_sub(3) as usize;
-                    let index = list_offset(app.selected_rule, visible)
-                        + (mouse.row - content.y - 2) as usize;
+                    let offset = list_offset(app.selected_rule, visible, app.rule_offset);
+                    let index = offset + (mouse.row - content.y - 2) as usize;
                     if index < app.rules.len() {
                         app.selected_rule = index;
                         app.selected_id = Some(app.rules[index].id);
+                        app.rule_offset = offset;
                     }
                 }
                 Page::Hosts => {
                     let visible = content.height.saturating_sub(2) as usize;
-                    let index = list_offset(app.selected_host, visible)
-                        + (mouse.row - content.y - 1) as usize;
+                    let offset = list_offset(app.selected_host, visible, app.host_offset);
+                    let index = offset + (mouse.row - content.y - 1) as usize;
                     if index < app.hosts.len() {
                         app.selected_host = index;
+                        app.host_offset = offset;
                     }
                 }
                 _ => {}
@@ -681,6 +698,17 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, size: Rect) {
                 } else {
                     -1
                 });
+                match app.page {
+                    Page::Dashboard => {
+                        let visible = content.height.saturating_sub(3) as usize;
+                        app.rule_offset = list_offset(app.selected_rule, visible, app.rule_offset);
+                    }
+                    Page::Hosts => {
+                        let visible = content.height.saturating_sub(2) as usize;
+                        app.host_offset = list_offset(app.selected_host, visible, app.host_offset);
+                    }
+                    _ => {}
+                }
             }
         }
         _ => {}
@@ -983,7 +1011,7 @@ fn handle_key(app: &mut App, key: KeyEvent, service: &dyn UiService, catalog: &m
         }
         KeyCode::Char('r') if app.page == Page::Hosts => match catalog.refresh() {
             Ok(v) => {
-                app.hosts = v.aliases;
+                app.replace_hosts(v.aliases);
                 app.message = "ホスト一覧を更新しました".into()
             }
             Err(e) => app.message = e.to_string(),
@@ -1114,7 +1142,11 @@ fn render_settings(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     );
 }
 fn render_dashboard(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
-    let offset = list_offset(app.selected_rule, area.height.saturating_sub(3) as usize);
+    let offset = list_offset(
+        app.selected_rule,
+        area.height.saturating_sub(3) as usize,
+        app.rule_offset,
+    );
     let rows = app.rules.iter().enumerate().skip(offset).map(|(i, r)| {
         Row::new(vec![
             Cell::from(if i == app.selected_rule { ">" } else { " " }),
@@ -1150,7 +1182,11 @@ fn render_dashboard(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     frame.render_widget(table, area)
 }
 fn render_hosts(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
-    let offset = list_offset(app.selected_host, area.height.saturating_sub(2) as usize);
+    let offset = list_offset(
+        app.selected_host,
+        area.height.saturating_sub(2) as usize,
+        app.host_offset,
+    );
     let items = if app.hosts.is_empty() {
         vec![ListItem::new("SSH config に具体的な Host がありません")]
     } else {
@@ -1563,13 +1599,15 @@ mod tests {
             handle_mouse(&mut app, mouse(MouseEventKind::ScrollDown, 5, 5), size);
         }
         assert_eq!(app.selected_rule, 11);
-        let offset = list_offset(app.selected_rule, 4);
+        let offset = list_offset(app.selected_rule, 4, app.rule_offset);
         handle_mouse(
             &mut app,
             mouse(MouseEventKind::Down(MouseButton::Left), 5, 5),
             size,
         );
         assert_eq!(app.selected_rule, offset);
+        assert_eq!(app.rule_offset, offset, "click must preserve the viewport");
+        assert_eq!(list_offset(app.selected_rule, 4, app.rule_offset), offset);
         handle_mouse(
             &mut app,
             mouse(MouseEventKind::Down(MouseButton::Left), 5, 4),
@@ -1624,6 +1662,23 @@ mod tests {
             size,
         );
         assert_eq!(app.selected_host, 19, "footer click must be ignored");
+    }
+
+    #[test]
+    fn host_refresh_clamps_selection_and_viewport() {
+        let mut app = App {
+            hosts: (0..20).map(|i| format!("host-{i}")).collect(),
+            selected_host: 19,
+            host_offset: 16,
+            ..App::default()
+        };
+        app.replace_hosts(vec!["remaining".into()]);
+        assert_eq!(app.selected_host, 0);
+        assert_eq!(app.host_offset, 0);
+        assert_eq!(list_offset(app.selected_host, 4, app.host_offset), 0);
+        app.replace_hosts(Vec::new());
+        assert_eq!(app.selected_host, 0);
+        assert_eq!(app.host_offset, 0);
     }
 
     #[test]
