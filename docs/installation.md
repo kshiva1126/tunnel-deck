@@ -19,6 +19,18 @@ Add that directory to `PATH` if `tdeck` is not found after installation.
 Broader native macOS support is still under validation; see the
 [native validation checklist](macos-validation.md).
 
+## Install from crates.io on Linux or macOS
+
+Build the published package with its locked dependency graph:
+
+```sh
+cargo install tunnel-deck --locked
+tdeck --version
+tdeck --help
+```
+
+The crate is named `tunnel-deck`; the installed command is `tdeck`.
+
 ## Install from Git on Linux or macOS
 
 Use the locked repository dependency graph:
@@ -29,9 +41,8 @@ tdeck --version
 tdeck --help
 ```
 
-TunnelDeck is not currently published on crates.io. Do not use
-`cargo install tunnel-deck`; that command would refer only to a crates.io
-package and is not the documented installation route.
+This route installs the latest Git revision. To install a specific revision,
+add `--rev <commit>` to the command and review that commit first.
 
 ## Install from an existing clone
 
@@ -66,7 +77,13 @@ daemon again.
 ## Update
 
 Follow the daemon shutdown procedure above before replacing the executable.
-Then reinstall from Git:
+Then update from crates.io:
+
+```sh
+cargo install tunnel-deck --locked --force
+```
+
+To update from Git instead, reinstall the desired branch or revision:
 
 ```sh
 cargo install --git https://github.com/kshiva1126/tunnel-deck --locked --force

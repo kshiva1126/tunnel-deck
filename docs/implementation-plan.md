@@ -381,7 +381,9 @@ Implementation status: GH-63 makes locked `cargo install` from Git or a local
 clone the required initial distribution path. The Linux/macOS CI matrix installs
 the checkout into an isolated root, executes the installed binary's version and
 help entry points, and verifies that Cargo packages the README, license,
-manifest, and source entry points. crates.io publication is not claimed.
+manifest, and source entry points. GH-67 adds crates.io publication of 0.1.0
+as a second Cargo source and records its published commit separately from the
+future prebuilt GitHub Release.
 Signing, notarization, Gatekeeper, and minimum-hardware checks remain future
 prebuilt-distribution work under GH-51 rather than blockers for the source-build
 path. This supplies the distribution evidence used to assess GH-10; GH-51 is

@@ -65,13 +65,12 @@ The initial distribution path is a locked source build with Cargo on Linux and
 macOS. Install Rust 1.85 and OpenSSH, then run:
 
 ```sh
-cargo install --git https://github.com/kshiva1126/tunnel-deck --locked
+cargo install tunnel-deck --locked
 tdeck --version
 ```
 
-The repository is not currently published on crates.io, so
-`cargo install tunnel-deck` is not a valid installation command. See the
-[installation guide](docs/installation.md) for installing from a clone,
+The executable is named `tdeck`. See the
+[installation guide](docs/installation.md) for installing from Git or a clone,
 updating, uninstalling, prerequisites, and SSH preparation.
 
 ## Prebuilt release artifacts
