@@ -103,6 +103,7 @@ fn invalid_host_alias_is_a_usage_error() {
 
 #[test]
 fn version_uses_package_version() {
+    assert_eq!(env!("CARGO_PKG_VERSION"), "0.2.0");
     let output = tdeck()
         .arg("--version")
         .output()
