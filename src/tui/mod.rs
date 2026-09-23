@@ -644,7 +644,7 @@ fn save_import(app: &mut App, service: &dyn UiService) {
     let Some(panel) = app.import.as_ref() else {
         return;
     };
-    let Some(preview) = panel.preview.as_ref() else {
+    let Some(preview) = panel.preview.clone() else {
         return;
     };
     let selected = panel.selected.clone();
@@ -655,12 +655,23 @@ fn save_import(app: &mut App, service: &dyn UiService) {
             return;
         }
     };
+    let settings = match service.load_settings() {
+        Ok(settings) => settings,
+        Err(error) => {
+            app.message = error.clone();
+            if let Some(panel) = &mut app.import {
+                panel.confirming = false;
+                panel.error = Some(error);
+            }
+            return;
+        }
+    };
     let rules = match selected_rules(
-        preview,
+        &preview,
         &selected,
         &existing,
-        app.settings.default_auto_start,
-        app.settings.default_reconnect,
+        settings.default_auto_start,
+        settings.default_reconnect,
     ) {
         Ok(rules) => rules.iter().map(WireRule::from).collect::<Vec<_>>(),
         Err(error) => {
@@ -1335,6 +1346,7 @@ mod tests {
         calls: RefCell<Vec<(Operation, Value)>>,
         rules: RefCell<Vec<RuleView>>,
         import_error: Option<String>,
+        settings_error: Option<String>,
     }
     impl UiService for MockService {
         fn call(&self, operation: Operation, payload: Value) -> Result<Value, String> {
@@ -1351,7 +1363,9 @@ mod tests {
             Ok(self.rules.borrow().clone())
         }
         fn load_settings(&self) -> Result<Settings, String> {
-            Ok(Settings::default())
+            self.settings_error
+                .clone()
+                .map_or_else(|| Ok(Settings::default()), Err)
         }
         fn save_settings(&self, settings: &Settings) -> Result<Settings, String> {
             Ok(settings.clone())
@@ -1428,6 +1442,21 @@ mod tests {
                 .count(),
             1
         );
+
+        let service = MockService {
+            settings_error: Some("settings unavailable".into()),
+            ..MockService::default()
+        };
+        app.import = Some(ImportPanel::preview(import_preview()));
+        handle_import_key(&mut app, key(KeyCode::Char(' ')), &service);
+        handle_import_key(&mut app, key(KeyCode::Enter), &service);
+        handle_import_key(&mut app, key(KeyCode::Enter), &service);
+        let panel = app
+            .import
+            .as_ref()
+            .expect("settings failure keeps preview open");
+        assert_eq!(panel.error.as_deref(), Some("settings unavailable"));
+        assert!(service.calls.borrow().is_empty());
     }
 
     #[test]
