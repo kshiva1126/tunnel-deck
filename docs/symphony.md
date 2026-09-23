@@ -229,6 +229,17 @@ Because both host and Docker launchers use the same trusted hooks, their report
 behavior is identical. The four sensitive variables continue to be removed
 before the Codex child starts.
 
+On a publish-hook failure, the hook adds its fixed execution stage and numeric
+exit status to the same report before its final comment update. This diagnosis
+survives a long Cargo run whose trailing log lines are truncated. Cargo output
+is not copied into the report or hook diagnostic because test output may contain
+secrets. A failed validation in Docker writes the diagnosis as the workspace
+owner, then the trusted parent updates the Issue comment. The gate still makes
+no push or PR after a failed check and persists its stop record. Stage and exit
+status identify where the failure occurred; they do not establish GH-63's
+specific root cause. Raw-output retention and free-form error excerpts were
+rejected because they could expose credentials or user-controlled test data.
+
 If comment publication fails, inspect the sanitized hook diagnostic and the
 trusted `GH-N.stopped` record with the worker stopped. Repair permission,
 timeout, duplicate-marker, or report-validation problems before following the

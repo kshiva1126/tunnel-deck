@@ -15,6 +15,11 @@ MAX_REPORT_BYTES = 48 * 1024
 MAX_COMMENT_BYTES = 60 * 1024
 API_TIMEOUT = 30
 STATUSES = {"in_progress", "completed", "failed", "blocked", "interrupted", "publish_failed"}
+PUBLISH_STAGES = {
+    "setup", "report comment", "workspace validation", "credential scan",
+    "cargo fmt", "cargo clippy", "cargo test", "pre-push admission",
+    "trusted bundle", "git push", "pull request", "final report", "issue transition",
+}
 MARKER = "<!-- tunnel-deck-symphony-run-report -->"
 CREDENTIAL = re.compile(
     r"(?i)(github_pat_[A-Za-z0-9_]{20,}|gh[opsur]_[A-Za-z0-9_]{20,}|"
@@ -55,6 +60,21 @@ def initial_report(number, run_id):
 def write_initial(workspace, number, run_id):
     path = report_path(workspace)
     path.write_text(json.dumps(initial_report(number, run_id), indent=2) + "\n")
+    path.chmod(0o600)
+
+
+def record_publish_failure(workspace, number, stage, exit_code, status):
+    """Keep a fixed, secret-free failure diagnosis independent of hook log length."""
+    if (stage not in PUBLISH_STAGES or not re.fullmatch(r"[1-9][0-9]{0,2}", exit_code)
+            or status not in ("failed", "publish_failed")):
+        raise ReportError("publish failure details are invalid")
+    report = load_report(workspace, number)
+    if status == "publish_failed" or report["status"] not in ("blocked", "interrupted"):
+        report["status"] = status
+    diagnosis = f"Publish hook: {stage} failed (exit status {exit_code})."
+    report["facts"].append(diagnosis)
+    path = report_path(workspace)
+    path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     path.chmod(0o600)
 
 
@@ -271,6 +291,9 @@ def main():
     if command == "validate-complete" and not rest:
         if load_report(workspace, number)["status"] != "completed":
             raise ReportError("committed run report is not completed")
+        return
+    if command == "failure" and len(rest) == 3:
+        record_publish_failure(workspace, number, *rest)
         return
     raise ReportError("run report command is invalid")
 

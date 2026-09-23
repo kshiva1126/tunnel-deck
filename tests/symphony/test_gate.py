@@ -735,6 +735,43 @@ class HookTests(unittest.TestCase):
         self.assertEqual(comments[0]["body"].count("### 試行"), 1)
         self.assertIn("`failed`", comments[0]["body"])
 
+    def test_long_cargo_failure_retains_safe_stage_without_publication_in_both_modes(self):
+        # A failing test prints far more than a normal hook log tail and a
+        # synthetic secret. The report must retain the trusted diagnosis.
+        (self.workspace / "src/lib.rs").write_text(
+            '#[cfg(test)]\nmod tests {\n'
+            '    #[test]\n    fn fails() {\n'
+            '        for _ in 0..4000 {\n'
+            '            println!("padding padding padding padding");\n'
+            '        }\n'
+            '        panic!("synthetic-secret-do-not-log");\n'
+            '    }\n}\n')
+        for docker in (False, True):
+            with self.subTest(docker=docker):
+                if docker:
+                    self.env.update(FAKE_ROOT_MODE="1", SYMPHONY_AUTO_REVIEW="1",
+                                    SYMPHONY_AGENT_UID="1234", SYMPHONY_AGENT_GID="1234")
+                self.save()
+                before, after = self.attempt()
+                self.assertEqual(before.returncode, 0, before.stderr)
+                self.assertNotEqual(after.returncode, 0)
+                self.assertIn("cargo test failed (exit status 101)", after.stderr)
+                self.assertNotIn("synthetic-secret-do-not-log", after.stdout + after.stderr)
+                report = run_report.load_report(self.workspace, 24)
+                self.assertEqual(report["status"], "failed")
+                self.assertIn("Publish hook: cargo test failed (exit status 101).", report["facts"])
+                comments = json.loads((self.root / "fixture.json").read_text())["comments"][0]
+                self.assertEqual(len(comments), 1)
+                self.assertIn("cargo test failed (exit status 101)", comments[0]["body"])
+                self.assertNotIn("synthetic-secret-do-not-log", comments[0]["body"])
+                self.assertNotIn("push --no-verify", self.calls())
+                self.assertNotIn("gh pr create", self.calls())
+                self.assertEqual("setpriv --reuid=" in self.calls(), docker)
+                self.assertTrue((self.root / "state/GH-24.stopped").exists())
+                self.clear_stop()
+                (self.root / "calls").unlink()
+                (self.root / "codex-ran").unlink()
+
     def test_comment_api_failure_is_bounded_and_leaves_code_untouched(self):
         self.config["fail"] = "comments"
         self.save()
@@ -781,6 +818,11 @@ class HookTests(unittest.TestCase):
                                          for line in self.calls().splitlines()), 3)
                     self.assertNotIn("push --no-verify", self.calls())
                     self.assertNotIn("gh pr ", self.calls())
+                    report = run_report.load_report(self.workspace, 24)
+                    self.assertIn("Publish hook: pre-push admission failed (exit status 1).",
+                                  report["facts"])
+                    comments = json.loads((self.root / "fixture.json").read_text())["comments"][0]
+                    self.assertIn("pre-push admission failed (exit status 1)", comments[0]["body"])
                     self.assertFalse((self.root / "state/GH-24.permit").exists())
                     self.assertTrue((self.root / "state/GH-24.stopped").exists())
                     calls = self.calls()

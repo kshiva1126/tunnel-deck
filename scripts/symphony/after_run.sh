@@ -40,7 +40,12 @@ if [ "$(id -u)" -eq 0 ] && [ -n "$SYMPHONY_AGENT_UID" ] \
     "$0" "$workspace"
   validate_status=$?
   set -e
-  [ "$validate_status" -eq 0 ] || exit "$validate_status"
+  if [ "$validate_status" -ne 0 ]; then
+    issue_number=$(issue_number_from_workspace "$workspace")
+    python3 "$control_root/scripts/symphony/run_report.py" \
+      publish "$workspace" "$issue_number" >/dev/null || true
+    exit "$validate_status"
+  fi
   after_validation=$(trusted_git_read rev-parse HEAD)
   [ "$after_validation" = "$validated_commit" ] || \
     die "workspace HEAD changed during validation"
@@ -75,14 +80,6 @@ if [ "${SYMPHONY_TRUSTED_PUBLISH_ONLY:-0}" != 1 ]; then
   become_agent_for_workspace "$workspace" "$0" "$@"
 fi
 
-require_command git
-require_command cargo
-require_command python3
-if [ "${SYMPHONY_VALIDATE_ONLY:-0}" != 1 ]; then
-  require_token
-  require_command gh
-fi
-
 agent_command() {
   env -u SYMPHONY_GITHUB_TOKEN -u GH_TOKEN -u GITHUB_TOKEN -u SSH_AUTH_SOCK "$@"
 }
@@ -90,6 +87,7 @@ agent_command() {
 issue_number=$(issue_number_from_workspace "$workspace")
 branch=$(branch_for_issue "$issue_number")
 failure_status=failed
+failure_stage=setup
 trusted_push_dir=
 
 record_failure() {
@@ -99,30 +97,38 @@ record_failure() {
     rm -rf -- "$trusted_push_dir"
   fi
   if [ "$status" -ne 0 ]; then
-    python3 - "$workspace/.symphony-run-report.json" "$failure_status" <<'PY' || true
-import json
-import pathlib
-import sys
-
-path = pathlib.Path(sys.argv[1])
-report = json.loads(path.read_text(encoding="utf-8"))
-if sys.argv[2] == "publish_failed" or report["status"] not in ("blocked", "interrupted"):
-    report["status"] = sys.argv[2]
-path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-PY
-    python3 "$control_root/scripts/symphony/run_report.py" \
-      publish "$workspace" "$issue_number" >/dev/null || true
+    python3 "$control_root/scripts/symphony/run_report.py" failure \
+      "$workspace" "$issue_number" "$failure_stage" "$status" "$failure_status" || true
+    printf 'symphony harness: %s failed (exit status %s)\n' "$failure_stage" "$status" >&2
+    if [ "${SYMPHONY_VALIDATE_ONLY:-0}" != 1 ]; then
+      python3 "$control_root/scripts/symphony/run_report.py" \
+        publish "$workspace" "$issue_number" >/dev/null || true
+    fi
   fi
   exit "$status"
 }
 if [ "${SYMPHONY_VALIDATE_ONLY:-0}" != 1 ]; then
   trap record_failure EXIT HUP INT TERM
+  failure_stage='report comment'
   report_url=$(python3 "$control_root/scripts/symphony/run_report.py" \
     publish "$workspace" "$issue_number") || \
     die "run report publication failed; nothing was published"
 fi
 
+if [ "${SYMPHONY_VALIDATE_ONLY:-0}" = 1 ]; then
+  trap record_failure EXIT HUP INT TERM
+fi
+
+require_command git
+require_command cargo
+require_command python3
+if [ "${SYMPHONY_VALIDATE_ONLY:-0}" != 1 ]; then
+  require_token
+  require_command gh
+fi
+
 if [ "${SYMPHONY_TRUSTED_PUBLISH_ONLY:-0}" != 1 ]; then
+  failure_stage='workspace validation'
   current_branch=$(trusted_git_read branch --show-current)
   [ "$current_branch" = "$branch" ] || \
     die "refusing to publish unexpected branch: $current_branch"
@@ -134,17 +140,21 @@ if [ "${SYMPHONY_TRUSTED_PUBLISH_ONLY:-0}" != 1 ]; then
   python3 "$control_root/scripts/symphony/run_report.py" \
     validate-complete "$workspace" "$issue_number"
 
+  failure_stage='credential scan'
   if trusted_git_read diff --no-ext-diff --no-textconv "origin/$base_branch...HEAD" | \
     grep -Eiq '(github_pat_[A-Za-z0-9_]{20,}|gh[opsur]_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|"(access|refresh|id)_token"[[:space:]]*:)'; then
     die "possible credential found in committed diff; nothing was published"
   fi
 
-  (
-    cd "$workspace"
-    agent_command cargo fmt --check
-    agent_command cargo clippy --all-targets --all-features -- -D warnings
-    agent_command cargo test --all-features
-  )
+  cd "$workspace"
+  # Cargo output can contain user-controlled strings. The fixed stage and
+  # exit status below are safe to retain even when its output is enormous.
+  failure_stage='cargo fmt'
+  agent_command cargo fmt --check >/dev/null 2>&1
+  failure_stage='cargo clippy'
+  agent_command cargo clippy --all-targets --all-features -- -D warnings >/dev/null 2>&1
+  failure_stage='cargo test'
+  agent_command cargo test --all-features >/dev/null 2>&1
   validated_commit=${SYMPHONY_VALIDATED_COMMIT:-$(trusted_git_read rev-parse HEAD)}
   [ "$(trusted_git_read rev-parse HEAD)" = "$validated_commit" ] || \
     die "workspace HEAD changed during validation"
@@ -152,6 +162,8 @@ if [ "${SYMPHONY_TRUSTED_PUBLISH_ONLY:-0}" != 1 ]; then
 fi
 
 # Recheck after Rust checks, immediately before the first remote write.
+failure_status=publish_failed
+failure_stage='pre-push admission'
 python3 "$control_root/scripts/symphony/gate.py" verify "$workspace"
 
 current_branch=$(trusted_git_read branch --show-current)
@@ -161,7 +173,7 @@ published_commit=${SYMPHONY_VALIDATED_COMMIT:-$(trusted_git_read rev-parse HEAD)
 [ "$(trusted_git_read rev-parse HEAD)" = "$published_commit" ] || \
   die "workspace HEAD changed after validation"
 
-failure_status=publish_failed
+failure_stage='trusted bundle'
 trusted_push_dir=$(mktemp -d "${SYMPHONY_STATE_ROOT:?}/trusted-push.XXXXXX")
 chmod 0700 "$trusted_push_dir"
 trusted_bundle="$trusted_push_dir/source.bundle"
@@ -187,6 +199,7 @@ env -u SYMPHONY_GITHUB_TOKEN -u GH_TOKEN -u GITHUB_TOKEN -u SSH_AUTH_SOCK \
   GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
   git -C "$trusted_push_dir" rev-parse FETCH_HEAD)" = "$published_commit" ] || \
   die "trusted staging did not reproduce the validated commit"
+failure_stage='git push'
 env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_INDEX_FILE \
   -u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_PREFIX \
   GIT_ASKPASS="$control_root/scripts/symphony/git-askpass.sh" \
@@ -206,6 +219,7 @@ existing_pr=$(GH_TOKEN="$SYMPHONY_GITHUB_TOKEN" \
   gh pr list --repo "$repo_slug" --head "$branch" --state open \
   --json url --jq '.[0].url // empty')
 
+failure_stage='pull request'
 if [ -n "$existing_pr" ]; then
   pr_url=$existing_pr
 else
@@ -229,6 +243,7 @@ else
   rm -f "$body_file"
 fi
 
+failure_stage='final report'
 python3 - "$workspace/.symphony-run-report.json" "$pr_url" "$published_commit" <<'PY'
 import json
 import pathlib
@@ -244,6 +259,7 @@ PY
 python3 "$control_root/scripts/symphony/run_report.py" \
   publish "$workspace" "$issue_number" >/dev/null
 
+failure_stage='issue transition'
 if [ "${SYMPHONY_TRUSTED_PUBLISH_ONLY:-0}" = 1 ]; then
   : # The root-owned caller continues with automated review.
 elif [ "${SYMPHONY_AUTO_REVIEW:-0}" = 1 ]; then
