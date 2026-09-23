@@ -924,17 +924,13 @@ fn handle_key(app: &mut App, key: KeyEvent, service: &dyn UiService, catalog: &m
                                     rules.iter().any(|rule| rule.id == confirmation.id);
                                 app.replace_rules(rules);
                                 if still_present {
-                                    format!(
-                                        "削除できませんでした: {error}。残った転送の状態を確認し、d で再試行してください"
-                                    )
+                                    format!("削除失敗。状態確認後 dで再試行: {error}")
                                 } else {
-                                    format!(
-                                        "削除要求はエラーでしたが、対象は一覧にありません: {error}。再起動後も削除済みか確認してください"
-                                    )
+                                    format!("一覧から消えました。再起動後に確認: {error}")
                                 }
                             }
                             Err(refresh_error) => format!(
-                                "削除できませんでした: {error}。状態の再取得も失敗しました: {refresh_error}。再接続後に状態を確認してください"
+                                "状態不明。再接続後に確認: {error}; 再取得失敗: {refresh_error}"
                             ),
                         };
                     }
@@ -1796,9 +1792,12 @@ mod tests {
             assert!(app.message.contains(if stop_fails {
                 "停止できませんでした"
             } else {
-                "削除できませんでした"
+                "削除失敗"
             }));
             assert!(app.message.contains("再試行"));
+            if !stop_fails {
+                assert!(rendered(&app, 42).contains("dで再試行"));
+            }
         }
     }
 
@@ -1821,8 +1820,9 @@ mod tests {
         handle_key(&mut app, key(KeyCode::Enter), &service, &mut catalog);
         assert_eq!(service.rules.borrow()[0].state, "stopped");
         assert_eq!(app.rules[0].state, "active");
-        assert!(app.message.contains("状態の再取得も失敗"));
-        assert!(app.message.contains("再接続後に状態を確認"));
+        assert!(app.message.contains("再接続後に確認"));
+        assert!(app.message.contains("再取得失敗"));
+        assert!(rendered(&app, 42).contains("再接続後に確認"));
     }
 
     #[test]
@@ -1843,9 +1843,10 @@ mod tests {
         handle_key(&mut app, key(KeyCode::Char('d')), &service, &mut catalog);
         handle_key(&mut app, key(KeyCode::Enter), &service, &mut catalog);
         assert!(app.rules.is_empty());
-        assert!(app.message.contains("対象は一覧にありません"));
-        assert!(app.message.contains("再起動後も削除済みか確認"));
+        assert!(app.message.contains("一覧から消えました"));
+        assert!(app.message.contains("再起動後に確認"));
         assert!(!app.message.contains("d で再試行"));
+        assert!(rendered(&app, 42).contains("再起動後に確認"));
     }
 
     #[test]
