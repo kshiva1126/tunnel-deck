@@ -6,7 +6,7 @@ controlling, and monitoring SSH port forwarding.
 - Product name: **TunnelDeck**
 - Repository and Rust package: `tunnel-deck`
 - Executable: `tdeck`
-- Planned implementation: Rust with Ratatui and Tokio
+- Implementation: Rust with Ratatui and Crossterm
 
 The goal is to make common SSH tunnel operations accessible from a coherent
 TUI while retaining a concise, scriptable CLI.
@@ -55,9 +55,6 @@ are also reported as one JSON value on stderr; other errors remain plain text.
 Daemon errors use stable exit statuses: 2 for invalid input, 4 for a missing
 rule, 5 for a conflict, 6 for an unavailable operation, and 70 for an internal
 failure.
-
-The exact command tree should be validated during the first implementation
-milestone rather than treated as frozen.
 
 ## Install and get started
 
