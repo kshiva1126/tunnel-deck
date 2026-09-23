@@ -920,10 +920,18 @@ fn handle_key(app: &mut App, key: KeyEvent, service: &dyn UiService, catalog: &m
                     Err(error) => {
                         app.message = match service.load_rules() {
                             Ok(rules) => {
+                                let still_present =
+                                    rules.iter().any(|rule| rule.id == confirmation.id);
                                 app.replace_rules(rules);
-                                format!(
-                                    "削除できませんでした: {error}。残った転送の状態を確認し、d で再試行してください"
-                                )
+                                if still_present {
+                                    format!(
+                                        "削除できませんでした: {error}。残った転送の状態を確認し、d で再試行してください"
+                                    )
+                                } else {
+                                    format!(
+                                        "削除要求はエラーでしたが、対象は一覧にありません: {error}。再起動後も削除済みか確認してください"
+                                    )
+                                }
                             }
                             Err(refresh_error) => format!(
                                 "削除できませんでした: {error}。状態の再取得も失敗しました: {refresh_error}。再接続後に状態を確認してください"
@@ -1640,6 +1648,7 @@ mod tests {
         rules: RefCell<Vec<RuleView>>,
         stop_error: Option<String>,
         remove_error: Option<String>,
+        remove_after_error: bool,
         load_error: Option<String>,
     }
     impl UiService for DeleteService {
@@ -1660,6 +1669,9 @@ mod tests {
                 }
                 Operation::ForwardRemove => {
                     if let Some(error) = &self.remove_error {
+                        if self.remove_after_error {
+                            self.rules.borrow_mut().retain(|rule| rule.id != id);
+                        }
                         return Err(error.clone());
                     }
                     self.rules.borrow_mut().retain(|rule| rule.id != id);
@@ -1811,6 +1823,29 @@ mod tests {
         assert_eq!(app.rules[0].state, "active");
         assert!(app.message.contains("状態の再取得も失敗"));
         assert!(app.message.contains("再接続後に状態を確認"));
+    }
+
+    #[test]
+    fn remove_error_after_commit_reports_missing_rule_without_retry_instruction() {
+        let mut rule = sample_rule();
+        rule.state = "active".into();
+        let service = DeleteService {
+            rules: RefCell::new(vec![rule.clone()]),
+            remove_error: Some("durability uncertain".into()),
+            remove_after_error: true,
+            ..DeleteService::default()
+        };
+        let mut app = App {
+            rules: vec![rule],
+            ..App::default()
+        };
+        let mut catalog = test_catalog();
+        handle_key(&mut app, key(KeyCode::Char('d')), &service, &mut catalog);
+        handle_key(&mut app, key(KeyCode::Enter), &service, &mut catalog);
+        assert!(app.rules.is_empty());
+        assert!(app.message.contains("対象は一覧にありません"));
+        assert!(app.message.contains("再起動後も削除済みか確認"));
+        assert!(!app.message.contains("d で再試行"));
     }
 
     #[test]
