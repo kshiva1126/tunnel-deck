@@ -2,6 +2,10 @@
 
 use crate::{
     application::hosts::HostCatalog,
+    application::import::{
+        DirectiveKind, ImportClassification, ImportForwarding, ImportPreview, InvalidReason,
+        UnsupportedReason, selected_rules,
+    },
     config::{LogLevel, Rule as WireRule, Settings, Theme},
     daemon::lifecycle,
     domain::rule::{Rule, RuleId},
@@ -29,6 +33,7 @@ use ratatui::{
 use serde_json::{Value, json};
 use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
 use std::{
+    collections::HashSet,
     env, io,
     net::TcpListener,
     path::PathBuf,
@@ -61,6 +66,7 @@ struct RuleView {
     bind_address: String,
     bind_port: u16,
     destination_port: Option<u16>,
+    destination_host: Option<String>,
     state: String,
     kind: &'static str,
     auto_start: bool,
@@ -78,6 +84,7 @@ impl RuleView {
                 ssh_host_alias,
                 bind_address,
                 bind_port,
+                destination_host,
                 destination_port,
                 auto_start,
                 reconnect,
@@ -89,6 +96,7 @@ impl RuleView {
                 bind_address,
                 bind_port,
                 destination_port: Some(destination_port),
+                destination_host: Some(destination_host),
                 state: "stopped".into(),
                 kind: "local",
                 auto_start,
@@ -103,6 +111,7 @@ impl RuleView {
                 ssh_host_alias,
                 bind_address,
                 bind_port,
+                destination_host,
                 destination_port,
                 auto_start,
                 reconnect,
@@ -114,6 +123,7 @@ impl RuleView {
                 bind_address,
                 bind_port,
                 destination_port: Some(destination_port),
+                destination_host: Some(destination_host),
                 state: "stopped".into(),
                 kind: "remote",
                 auto_start,
@@ -137,6 +147,7 @@ impl RuleView {
                 bind_address,
                 bind_port,
                 destination_port: None,
+                destination_host: None,
                 state: "stopped".into(),
                 kind: "dynamic",
                 auto_start,
@@ -154,6 +165,74 @@ impl RuleView {
             self.bind_address.clone()
         };
         format!("{scheme}://{address}:{}", self.bind_port)
+    }
+    fn to_wire(&self) -> WireRule {
+        match self.kind {
+            "remote" => WireRule::Remote {
+                id: self.id,
+                name: self.name.clone(),
+                ssh_host_alias: self.host.clone(),
+                bind_address: self.bind_address.clone(),
+                bind_port: self.bind_port,
+                destination_host: self.destination_host.clone().unwrap_or_default(),
+                destination_port: self.destination_port.unwrap_or_default(),
+                auto_start: self.auto_start,
+                reconnect: self.reconnect,
+            },
+            "dynamic" => WireRule::Dynamic {
+                id: self.id,
+                name: self.name.clone(),
+                ssh_host_alias: self.host.clone(),
+                bind_address: self.bind_address.clone(),
+                bind_port: self.bind_port,
+                auto_start: self.auto_start,
+                reconnect: self.reconnect,
+            },
+            _ => WireRule::Local {
+                id: self.id,
+                name: self.name.clone(),
+                ssh_host_alias: self.host.clone(),
+                bind_address: self.bind_address.clone(),
+                bind_port: self.bind_port,
+                destination_host: self.destination_host.clone().unwrap_or_default(),
+                destination_port: self.destination_port.unwrap_or_default(),
+                auto_start: self.auto_start,
+                reconnect: self.reconnect,
+            },
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ImportPanel {
+    host: String,
+    preview: Option<ImportPreview>,
+    error: Option<String>,
+    cursor: usize,
+    selected: HashSet<usize>,
+    confirming: bool,
+}
+
+impl ImportPanel {
+    fn preview(preview: ImportPreview) -> Self {
+        Self {
+            host: preview.ssh_host_alias.clone(),
+            preview: Some(preview),
+            error: None,
+            cursor: 0,
+            selected: HashSet::new(),
+            confirming: false,
+        }
+    }
+    fn error(host: String, error: String) -> Self {
+        Self {
+            host,
+            preview: None,
+            error: Some(error),
+            cursor: 0,
+            selected: HashSet::new(),
+            confirming: false,
+        }
     }
 }
 
@@ -313,6 +392,7 @@ struct App {
     selected_id: Option<Uuid>,
     form: Option<Form>,
     confirm_delete: Option<Uuid>,
+    import: Option<ImportPanel>,
     message: String,
     settings: Settings,
     settings_field: usize,
@@ -329,6 +409,7 @@ impl Default for App {
             selected_id: None,
             form: None,
             confirm_delete: None,
+            import: None,
             message: "Tab: 画面切替  ?: ヘルプ  q: 終了".into(),
             settings: Settings::default(),
             settings_field: 0,
@@ -365,6 +446,12 @@ struct Service {
     socket: PathBuf,
     executable: PathBuf,
 }
+trait UiService {
+    fn call(&self, operation: Operation, payload: Value) -> Result<Value, String>;
+    fn load_rules(&self) -> Result<Vec<RuleView>, String>;
+    fn load_settings(&self) -> Result<Settings, String>;
+    fn save_settings(&self, settings: &Settings) -> Result<Settings, String>;
+}
 impl Service {
     fn new() -> Result<Self, AppError> {
         let paths = resolved_paths()?;
@@ -376,7 +463,7 @@ impl Service {
             .map_err(|e| AppError::Ipc(e.to_string()))?;
         Ok(Self { socket, executable })
     }
-    fn call(&self, operation: Operation, payload: Value) -> Result<Value, String> {
+    fn call_daemon(&self, operation: Operation, payload: Value) -> Result<Value, String> {
         lifecycle::ensure_running(&self.socket, &self.executable, DEFAULT_TIMEOUT)
             .map_err(|e| e.to_string())?;
         let request = Request::new(operation, payload);
@@ -392,6 +479,11 @@ impl Service {
             Response::Success(v) => Ok(v.result),
             Response::Failure(v) => Err(v.error.message),
         }
+    }
+}
+impl UiService for Service {
+    fn call(&self, operation: Operation, payload: Value) -> Result<Value, String> {
+        self.call_daemon(operation, payload)
     }
     fn load_rules(&self) -> Result<Vec<RuleView>, String> {
         let wire: Vec<WireRule> =
@@ -510,7 +602,7 @@ fn spawn_subscription(socket: PathBuf, sender: mpsc::Sender<()>) {
         }
     });
 }
-fn refresh(app: &mut App, service: &Service) {
+fn refresh(app: &mut App, service: &dyn UiService) {
     match service.load_rules() {
         Ok(v) => app.replace_rules(v),
         Err(e) => app.message = e,
@@ -520,9 +612,132 @@ fn refresh(app: &mut App, service: &Service) {
     }
 }
 
-fn handle_key(app: &mut App, key: KeyEvent, service: &Service, catalog: &mut HostCatalog) {
+fn rule_snapshots(app: &App) -> Result<(Vec<Rule>, Vec<RuleId>), String> {
+    let rules = app
+        .rules
+        .iter()
+        .map(|view| Rule::try_from(view.to_wire()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    let running = app
+        .rules
+        .iter()
+        .filter(|view| view.state != "stopped")
+        .map(|view| RuleId::from_uuid(view.id))
+        .collect();
+    Ok((rules, running))
+}
+
+fn open_import(app: &mut App, catalog: &HostCatalog, host: String) {
+    let panel = match rule_snapshots(app).and_then(|(rules, running)| {
+        catalog
+            .import_preview(&host, &rules, &running)
+            .map_err(|error| error.to_string())
+    }) {
+        Ok(preview) => ImportPanel::preview(preview),
+        Err(error) => ImportPanel::error(host, error),
+    };
+    app.import = Some(panel);
+}
+
+fn save_import(app: &mut App, service: &dyn UiService) {
+    let Some(panel) = app.import.as_ref() else {
+        return;
+    };
+    let Some(preview) = panel.preview.as_ref() else {
+        return;
+    };
+    let selected = panel.selected.clone();
+    let (existing, _) = match rule_snapshots(app) {
+        Ok(value) => value,
+        Err(error) => {
+            app.message = error;
+            return;
+        }
+    };
+    let rules = match selected_rules(
+        preview,
+        &selected,
+        &existing,
+        app.settings.default_auto_start,
+        app.settings.default_reconnect,
+    ) {
+        Ok(rules) => rules.iter().map(WireRule::from).collect::<Vec<_>>(),
+        Err(error) => {
+            app.message = error;
+            return;
+        }
+    };
+    match service.call(Operation::ForwardImport, json!({"rules": rules})) {
+        Ok(_) => {
+            app.import = None;
+            app.message = format!("選択した {} 件を保存しました（未起動）", selected.len());
+            refresh(app, service);
+        }
+        Err(error) => {
+            if let Some(panel) = &mut app.import {
+                panel.confirming = false;
+                panel.error = Some(error);
+            }
+        }
+    }
+}
+
+fn handle_import_key(app: &mut App, key: KeyEvent, service: &dyn UiService) {
+    let mut save = false;
+    let mut close = false;
+    if let Some(panel) = &mut app.import {
+        if panel.confirming {
+            match key.code {
+                KeyCode::Enter | KeyCode::Char('y') => save = true,
+                KeyCode::Esc | KeyCode::Char('n') => panel.confirming = false,
+                _ => {}
+            }
+        } else {
+            let len = panel
+                .preview
+                .as_ref()
+                .map_or(0, |preview| preview.candidates.len());
+            match key.code {
+                KeyCode::Esc => close = true,
+                KeyCode::Down | KeyCode::Char('j') if len != 0 => {
+                    panel.cursor = (panel.cursor + 1).min(len - 1)
+                }
+                KeyCode::Up | KeyCode::Char('k') if len != 0 => {
+                    panel.cursor = panel.cursor.saturating_sub(1)
+                }
+                KeyCode::Char(' ') if len != 0 => {
+                    let id = panel.cursor + 1;
+                    let selectable = panel.preview.as_ref().is_some_and(|preview| {
+                        matches!(
+                            preview.candidates[panel.cursor].classification,
+                            ImportClassification::Supported
+                        )
+                    });
+                    if selectable && !panel.selected.remove(&id) {
+                        panel.selected.insert(id);
+                    }
+                }
+                KeyCode::Enter if !panel.selected.is_empty() => panel.confirming = true,
+                _ => {}
+            }
+        }
+    }
+    if close {
+        app.import = None;
+    }
+    if save {
+        save_import(app, service);
+    }
+}
+
+fn handle_key(app: &mut App, key: KeyEvent, service: &dyn UiService, catalog: &mut HostCatalog) {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         app.quit = true;
+        return;
+    }
+    if app.import.is_some() {
+        handle_import_key(app, key, service);
         return;
     }
     if let Some(id) = app.confirm_delete {
@@ -663,6 +878,16 @@ fn handle_key(app: &mut App, key: KeyEvent, service: &Service, catalog: &mut Hos
             }
             Err(e) => app.message = e.to_string(),
         },
+        KeyCode::Char('i') if app.page == Page::Hosts => {
+            if let Some(host) = app.hosts.get(app.selected_host).cloned() {
+                open_import(app, catalog, host);
+            }
+        }
+        KeyCode::Char('i') if matches!(app.page, Page::Dashboard | Page::Detail) => {
+            if let Some(host) = app.selected().map(|rule| rule.host.clone()) {
+                open_import(app, catalog, host);
+            }
+        }
         KeyCode::Char('e') => {
             if let Some(rule) = app.selected().cloned() {
                 if rule.state == "stopped" {
@@ -750,13 +975,16 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
             ),
         chunks[0],
     );
-    match app.page{Page::Dashboard=>render_dashboard(frame,chunks[1],app),Page::Hosts=>render_hosts(frame,chunks[1],app),Page::Detail=>render_detail(frame,chunks[1],app),Page::Settings=>render_settings(frame,chunks[1],app),Page::Help=>frame.render_widget(Paragraph::new("j/k・↑/↓ 選択  Enter 詳細/決定  Space 起動/停止\nn 新規  e 編集  c 複製  d 削除  r ホスト更新\nh HTTP  s HTTPS  Tab 画面切替  q 終了（転送は継続）").wrap(Wrap{trim:false}).block(Block::default().title("ヘルプ").borders(Borders::ALL)),chunks[1])}
+    match app.page{Page::Dashboard=>render_dashboard(frame,chunks[1],app),Page::Hosts=>render_hosts(frame,chunks[1],app),Page::Detail=>render_detail(frame,chunks[1],app),Page::Settings=>render_settings(frame,chunks[1],app),Page::Help=>frame.render_widget(Paragraph::new("j/k・↑/↓ 選択  Enter 詳細/決定  Space 起動/停止\nn 新規  e 編集  c 複製  d 削除  r ホスト更新  i SSH転送import\nh HTTP  s HTTPS  Tab 画面切替  q 終了（転送は継続）").wrap(Wrap{trim:false}).block(Block::default().title("ヘルプ").borders(Borders::ALL)),chunks[1])}
     frame.render_widget(Paragraph::new(app.message.as_str()), chunks[2]);
     if let Some(form) = &app.form {
         render_form(frame, area, form)
     }
     if app.confirm_delete.is_some() {
         render_confirm(frame, area)
+    }
+    if let Some(import) = &app.import {
+        render_import(frame, area, import)
     }
 }
 fn render_settings(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
@@ -836,11 +1064,114 @@ fn render_hosts(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     frame.render_widget(
         List::new(items).block(
             Block::default()
-                .title("ホストを選択し Enter → ポート追加")
+                .title("Enter: ポート追加  i: SSH転送import")
                 .borders(Borders::ALL),
         ),
         area,
     )
+}
+fn candidate_text(candidate: &crate::application::import::ImportCandidate) -> String {
+    let kind = match candidate.kind {
+        DirectiveKind::Local => "Local",
+        DirectiveKind::Remote => "Remote",
+        DirectiveKind::Dynamic => "Dynamic",
+    };
+    let endpoint = match &candidate.forwarding {
+        Some(ImportForwarding::Local {
+            bind_address,
+            bind_port,
+            destination_host,
+            destination_port,
+        })
+        | Some(ImportForwarding::Remote {
+            bind_address,
+            bind_port,
+            destination_host,
+            destination_port,
+        }) => format!("{bind_address}:{bind_port} -> {destination_host}:{destination_port}"),
+        Some(ImportForwarding::Dynamic {
+            bind_address,
+            bind_port,
+        }) => format!("{bind_address}:{bind_port}"),
+        None => "-".to_owned(),
+    };
+    let status = match &candidate.classification {
+        ImportClassification::Supported => "保存可能".to_owned(),
+        ImportClassification::DuplicateDirective { first_index } => {
+            format!("重複: 候補 {}", first_index + 1)
+        }
+        ImportClassification::DuplicateRule { running, .. } => {
+            format!("重複: 保存済み{}", if *running { "・実行中" } else { "" })
+        }
+        ImportClassification::Conflict { running, .. } => {
+            format!("競合{}", if *running { "・実行中" } else { "" })
+        }
+        ImportClassification::Unsupported { reason } => format!(
+            "未対応: {}",
+            match reason {
+                UnsupportedReason::UnixSocket => "Unix socket",
+                UnsupportedReason::RemoteDynamic => "Remote SOCKS",
+            }
+        ),
+        ImportClassification::Invalid { reason } => format!(
+            "無効: {}",
+            match reason {
+                InvalidReason::Syntax => "構文",
+                InvalidReason::BindAddress => "bind",
+                InvalidReason::DestinationHost => "宛先",
+                InvalidReason::Port => "port",
+                InvalidReason::NonUtf8Output => "非UTF-8",
+            }
+        ),
+    };
+    format!("{kind:<7} {endpoint}  [{status}]")
+}
+fn render_import(frame: &mut ratatui::Frame<'_>, area: Rect, import: &ImportPanel) {
+    let popup = centered(area, 90, 18);
+    frame.render_widget(Clear, popup);
+    let mut lines = vec![Line::from(format!("ホスト: {}", import.host))];
+    if let Some(preview) = &import.preview {
+        if preview.candidates.is_empty() {
+            lines.push(Line::from("転送候補はありません"));
+        }
+        for (index, candidate) in preview.candidates.iter().enumerate() {
+            let cursor = if index == import.cursor { ">" } else { " " };
+            let mark = if import.selected.contains(&(index + 1)) {
+                "[x]"
+            } else if matches!(candidate.classification, ImportClassification::Supported) {
+                "[ ]"
+            } else {
+                "[-]"
+            };
+            lines.push(Line::from(format!(
+                "{cursor}{mark} {}. {}",
+                index + 1,
+                candidate_text(candidate)
+            )));
+        }
+    }
+    if let Some(error) = &import.error {
+        lines.push(Line::from(Span::styled(
+            format!("エラー: {error}"),
+            Style::default().fg(Color::Red),
+        )));
+    }
+    lines.push(Line::from(if import.confirming {
+        format!(
+            "選択した {} 件だけ保存します。Enter/y: 保存  Esc/n: 戻る",
+            import.selected.len()
+        )
+    } else {
+        "Space: 選択  Enter: 最終確認  Esc: キャンセル（変更なし）".to_owned()
+    }));
+    frame.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+            Block::default()
+                .title("SSH転送 import preview")
+                .borders(Borders::ALL),
+        ),
+        popup,
+    );
 }
 fn render_detail(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     let text=app.selected().map(|r|format!("名前: {}\n種別: {}\nホスト: {}\n状態: {}\n待受: {}:{} / 宛先ポート: {}\n稼働時間: {}秒 / 再接続: {}回\n最終診断: {}\nURL: {}\n\nh: HTTPで開く  s: HTTPSで開く",r.name,r.kind,r.host,r.state,r.bind_address,r.bind_port,r.destination_port.map(|v|v.to_string()).unwrap_or_else(||"-".into()),r.uptime_seconds,r.reconnect_count,r.last_error.as_deref().unwrap_or("-"),r.url("http"))).unwrap_or_else(||"転送がありません".into());
@@ -977,6 +1308,157 @@ fn write_terminal_restore(writer: &mut impl io::Write) -> io::Result<()> {
 mod tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend};
+    use std::cell::RefCell;
+
+    #[derive(Default)]
+    struct MockService {
+        calls: RefCell<Vec<(Operation, Value)>>,
+        rules: RefCell<Vec<RuleView>>,
+        import_error: Option<String>,
+    }
+    impl UiService for MockService {
+        fn call(&self, operation: Operation, payload: Value) -> Result<Value, String> {
+            self.calls.borrow_mut().push((operation, payload));
+            if operation == Operation::ForwardImport {
+                if let Some(error) = &self.import_error {
+                    return Err(error.clone());
+                }
+                return Ok(json!({"rule_ids": []}));
+            }
+            Ok(json!({}))
+        }
+        fn load_rules(&self) -> Result<Vec<RuleView>, String> {
+            Ok(self.rules.borrow().clone())
+        }
+        fn load_settings(&self) -> Result<Settings, String> {
+            Ok(Settings::default())
+        }
+        fn save_settings(&self, settings: &Settings) -> Result<Settings, String> {
+            Ok(settings.clone())
+        }
+    }
+    fn import_preview() -> ImportPreview {
+        crate::application::import::preview_effective_forwards(
+            "dev",
+            b"localforward 127.0.0.1:3000 127.0.0.1:30\nremoteforward 127.0.0.1:4000 127.0.0.1:40\ndynamicforward 127.0.0.1:1080\nlocalforward 127.0.0.1:3000 127.0.0.1:30\nlocalforward 127.0.0.1:3000 127.0.0.1:31\nremoteforward 9000\n",
+            &[],
+            &[],
+        ).unwrap()
+    }
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn import_saves_only_explicit_supported_selection_after_confirmation_without_starting() {
+        let service = MockService::default();
+        let mut app = App {
+            import: Some(ImportPanel::preview(import_preview())),
+            ..App::default()
+        };
+        handle_import_key(&mut app, key(KeyCode::Char(' ')), &service);
+        handle_import_key(&mut app, key(KeyCode::Down), &service);
+        handle_import_key(&mut app, key(KeyCode::Down), &service);
+        handle_import_key(&mut app, key(KeyCode::Char(' ')), &service);
+        handle_import_key(&mut app, key(KeyCode::Enter), &service);
+        assert!(
+            service.calls.borrow().is_empty(),
+            "confirmation must not save"
+        );
+        handle_import_key(&mut app, key(KeyCode::Enter), &service);
+
+        let calls = service.calls.borrow();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, Operation::ForwardImport);
+        let rules = calls[0].1["rules"].as_array().unwrap();
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0]["kind"], "local");
+        assert_eq!(rules[1]["kind"], "dynamic");
+        assert!(app.import.is_none());
+    }
+
+    #[test]
+    fn import_cancel_and_save_failure_leave_the_preview_without_other_mutations() {
+        let service = MockService::default();
+        let mut app = App {
+            import: Some(ImportPanel::preview(import_preview())),
+            ..App::default()
+        };
+        handle_import_key(&mut app, key(KeyCode::Esc), &service);
+        assert!(app.import.is_none());
+        assert!(service.calls.borrow().is_empty());
+
+        let service = MockService {
+            import_error: Some("save failed".into()),
+            ..MockService::default()
+        };
+        app.import = Some(ImportPanel::preview(import_preview()));
+        handle_import_key(&mut app, key(KeyCode::Char(' ')), &service);
+        handle_import_key(&mut app, key(KeyCode::Enter), &service);
+        handle_import_key(&mut app, key(KeyCode::Enter), &service);
+        let panel = app.import.as_ref().expect("failed save keeps preview open");
+        assert_eq!(panel.error.as_deref(), Some("save failed"));
+        assert!(!panel.confirming);
+        assert_eq!(
+            service
+                .calls
+                .borrow()
+                .iter()
+                .filter(|(op, _)| *op == Operation::ForwardImport)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn import_renders_normal_empty_error_narrow_and_short_states() {
+        let states = [
+            ImportPanel::preview(import_preview()),
+            ImportPanel::preview(ImportPreview {
+                ssh_host_alias: "empty".into(),
+                candidates: vec![],
+            }),
+            ImportPanel::error("dev".into(), "query failed".into()),
+        ];
+        for panel in states {
+            let app = App {
+                import: Some(panel),
+                ..App::default()
+            };
+            let backend = TestBackend::new(100, 30);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|frame| render(frame, &app)).unwrap();
+            let text = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            if app
+                .import
+                .as_ref()
+                .is_some_and(|panel| panel.host == "dev" && panel.preview.is_some())
+            {
+                for expected in ["Local", "Remote", "Dynamic"] {
+                    assert!(text.contains(expected), "missing {expected}: {text}");
+                }
+                let preview = app.import.as_ref().unwrap().preview.as_ref().unwrap();
+                assert!(candidate_text(&preview.candidates[3]).contains("重複"));
+                assert!(candidate_text(&preview.candidates[4]).contains("競合"));
+                assert!(candidate_text(&preview.candidates[5]).contains("未対応"));
+            }
+        }
+        for (width, height) in [(50, 12), (100, 10), (41, 30), (100, 9)] {
+            let app = App {
+                import: Some(ImportPanel::preview(import_preview())),
+                ..App::default()
+            };
+            let backend = TestBackend::new(width, height);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|frame| render(frame, &app)).unwrap();
+        }
+    }
     #[test]
     fn remote_port_becomes_local_default_and_busy_port_needs_acceptance() {
         let listener = TcpListener::bind((LOOPBACK, 0)).unwrap();
@@ -1039,6 +1521,7 @@ mod tests {
             bind_address: LOOPBACK.into(),
             bind_port: 3000,
             destination_port: Some(3000),
+            destination_host: Some(LOOPBACK.into()),
             state: "stopped".into(),
             kind: "local",
             auto_start: false,
@@ -1097,6 +1580,7 @@ mod tests {
             bind_address: "::1".into(),
             bind_port: 3000,
             destination_port: Some(3000),
+            destination_host: Some(LOOPBACK.into()),
             state: "active".into(),
             kind: "local",
             auto_start: false,

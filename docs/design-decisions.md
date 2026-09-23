@@ -419,6 +419,23 @@ event because the complete batch is already visible on disk. Repeating
 candidate saved. Import does not call start, alter running attempts, or edit SSH
 configuration.
 
+### M6 TUI import selection
+
+The host list and the selected rule's host can open the same effective-forward
+preview used by the CLI. The TUI keeps cursor and selection state locally,
+marks unsupported, invalid, duplicate, and conflicting candidates as
+unselectable, and requires a separate confirmation after at least one supported
+candidate is selected. It uses the shared application-layer selection and
+deterministic naming logic, then sends exactly one daemon `forward_import`
+mutation. It never sends `forward_start` as part of import.
+
+Escape/cancel, preview-query failure, terminal failure, and a failed daemon
+mutation do not change desired rules, running attempts, or SSH configuration.
+On mutation failure the preview remains open with the daemon diagnostic so the
+user can review or cancel. This preserves the existing daemon as sole writer
+and the terminal RAII cleanup boundary; no storage, IPC, authentication, or
+process-ownership contract changes are introduced.
+
 ### M2 daemon IPC foundation implementation
 
 The public daemon socket uses the existing version 1 newline-JSON contract,
